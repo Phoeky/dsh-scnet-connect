@@ -4,23 +4,134 @@
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 把 **SCNet 模型**接入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
-可**免客户端登录**，使用免费模型（`SCNet-Max`，基座基本可确定为 DeepSeek Flash）。
+可**免客户端登录**，使用免费模型（`SCNet-Max`，基座为 DeepSeek Flash 系列 —— 实测与 `DeepSeek-V4.1-Flash-1017` 行为一致，证据见 [基座认定](#基座认定scnet-max-与-deepseek-v41-flash-1017-的行为比对)）。
 
 - **零客户端**：不装 SCNet 桌面客户端，用手机短信登录即可使用
 - **零配置**：装了客户端的话，自动读凭据、自动发现免费模型
 - **设置页管理**：账号、登录、模型开关都在 DSH 设置里
 
+![设置页](.github/assets/settings.png)
+
 ---
 
-## 快速开始
+## 基座认定：SCNet-Max 与 DeepSeek-V4.1-Flash-1017 的行为比对
 
-### 方式一：免客户端登录（推荐）
+`SCNet-Max` 在平台目录里的 `description` 只有四个字（`SCNet-Max`），没有任何基座标注。下面是一组可复现的实测，用来判断它的基座。
+
+对比对象为 `DeepSeek-V4.1-Flash-1017`。
+
+
+### 证据一：分词器与对话模板完全一致
+
+同一字符串在两侧算出的 `prompt_tokens` 逐项相同（22 个探针，22 个一致）：
+
+| 探针 | 两侧 `prompt_tokens` |
+| --- | --- |
+| `"Hi"`（模板开销） | 31 |
+| 中文 | 36 |
+| 阿拉伯语 | 40 |
+| 印地语 | 47 |
+| 泰语 | 43 |
+| 韩语 | 41 |
+| 家庭 emoji（ZWJ） | 52 |
+| 旗帜 emoji | 46 |
+| 4 字节 CJK（`𠀋𠀌𠀍`） | 43 |
+| 零宽字符 + 组合音标 | 39 |
+| 代码块 | 44 |
+| base64 | 66 |
+| JSON | 41 |
+| 400 个 ASCII | 80 |
+| 200 个「中」 | 230 |
+
+基准串 `"Hi"` 在两侧都是 **31** token，说明 chat template 也一致。
+
+### 证据二：`temperature=0` 下逐字输出
+
+8 道确定性短题，其中 7 道字节级完全相同（sha256 前 8 位）：
+
+| 题目 | 输出 | sha256[:8] |
+| --- | --- | --- |
+| 输出 JSON `{"ok":true}` | `{"ok":true}` | `4062edaf75` |
+| 列出 1 到 5 | `1, 2, 3, 4, 5` | `43f0c4c6d1` |
+| `"hello world"` 转大写 | `HELLO WORLD` | `787ec76dca` |
+| 斐波那契第 10 项 | `55` | `02d20bbd7e` |
+| 3 的 5 次方 | `243` | `72440a20f5` |
+| `"abc"` 反转 | `cba` | `6d970874d0` |
+| 2024 是否闰年 | `是` | `b5141d3d19` |
+
+唯一不同的是自由论述题（「用一句话解释哈希表」）。该题在 `temperature=0.7` 复测时，两侧各采样出**完全相同的一整句**：
+
+```text
+哈希表是一种通过哈希函数把键映射到存储位置，从而以平均常数时间实现键值查找、插入和删除的数据结构。
+```
+
+跨两个不同网关各自采样，能撞出整句相同的汉语，基本排除「不同模型」的可能。
+
+### 证据三：知识边界重合
+
+| 事实 | 两侧答案 |
+| --- | --- |
+| Gemini 3 发布 | 2025-11-18 |
+| GPT-5 发布 | 2025-08-07 |
+| Claude 4 发布 | 2025-05-22 |
+| 2026 春节 | 2026-02-17 |
+| 2025 诺贝尔文学奖 | 拉斯洛·克拉斯纳霍尔凯（László Krasznahorkai） |
+| DeepSeek V4 | 均否认已发布（「截至 2026-04 / 2026-05」） |
+| DeepSeek-V4.1-Flash-1017 | 均不认识 |
+
+两侧都不认识自己的发布名——模型对自身 release 无知属正常现象，不构成反证。
+
+### 证据四：网关实现不同（证明这是两个独立部署）
+
+| 字段 | SCNet-Max | 对比侧 |
+| --- | --- | --- |
+| `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` | 无 | 有（DeepSeek 原生 schema） |
+| `service_tier` | 有 | 无 |
+| `system_fingerprint` | 字段缺失 | `""` |
+
+### 结论与残留不确定性
+
+**可以确定**：`SCNet-Max` 与 `DeepSeek-V4.1-Flash-1017` 在 tokenizer、chat template、知识边界、确定性输出上全部一致，属**同一模型**。
+
+**不能确定**：SCNet-Max 究竟是 `1017`，还是更早的 `DeepSeek-V4.1-Flash-0910`。DeepSeek 历代模型共用同一 tokenizer。
+
+
+## 安装
+
+三种方式，任选其一。
+
+### 方式一：DSH 插件页直接安装（最简单）
+
+打开 DSH 的 **插件** 页，在搜索/安装框里输入包名：
+
+```text
+dsh-scnet-connect
+```
+
+点安装即可。装完重启 DSH，或改一下 profile 的 `cordis.patch.yml` 触发热重载。
+
+### 方式二：命令行安装（npm）
 
 ```bash
 dsh plugin --profile desktop add dsh-scnet-connect
 ```
 
-然后打开 **设置 → SCNet Connect**：
+### 方式三：从源码安装
+
+```bash
+git clone https://github.com/Phoeky/dsh-scnet-connect.git
+cd dsh-scnet-connect
+dsh plugin --profile desktop add link:.
+```
+
+> 装完如果没生效，改一下 profile 的 `cordis.patch.yml`（加一行注释再保存）触发热重载，或重启 DSH。
+
+---
+
+## 快速开始
+### 方式一：免客户端登录（推荐）
+
+打开 **设置 → SCNet Connect**：
 
 1. 填手机号 → 点「获取验证码」→ 输入图形验证码
 2. 点「发送短信验证码」→ 填收到的 6 位验证码
@@ -30,15 +141,8 @@ dsh plugin --profile desktop add dsh-scnet-connect
 
 ### 方式二：用本机 SCNet 客户端
 
-先装好 SCNet 客户端并登录，正常发起一次对话（让客户端把凭据落到本地），然后：
-
-```bash
-dsh plugin --profile desktop add dsh-scnet-connect
-```
-
+先装好 SCNet 客户端并登录，正常发起一次对话（让客户端把凭据落到本地）。
 插件会自动读取凭据，客户端之后可以关掉。
-
-> 装完如果没生效，改一下 profile 的 `cordis.patch.yml`（加一行注释再保存）触发热重载，或重启 DSH。
 
 ---
 
@@ -54,6 +158,8 @@ dsh plugin --profile desktop add dsh-scnet-connect
 | 登录 / 退出 | 短信登录；退出后插件停止供 Key，可随时「恢复使用」 |
 | 只显示免费模型 | 默认开启。关闭后会把目录里所有模型都注册出来（可能产生费用） |
 | 刷新模型 | 重新读模型目录并用网关校验可用性 |
+
+![模型开关](.github/assets/settings-models.png)
 
 ---
 
@@ -132,7 +238,7 @@ dsh plugin --profile desktop add dsh-scnet-connect
 ## 开发
 
 ```bash
-git clone <repo> && cd dsh-scnet-connect
+git clone https://github.com/Phoeky/dsh-scnet-connect.git && cd dsh-scnet-connect
 node tools/check.mjs          # 自检：凭据、模型目录、账号
 node tools/check.mjs --live   # 额外请求一次 /models
 ```
