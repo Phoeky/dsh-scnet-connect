@@ -410,3 +410,134 @@ printf '用 read 工具读取 F:/code/dsh-scnet-connect/package.json，然后只
   ```
   截图：`.research/verify/settings-shot2.png`（不入库）。桩件级回归：
   `node .research/verify/client-sim.mjs`（注册、渲染、错误态、刷新点击）。
+
+### 10.7 新增：免客户端登录（v0.3.0，2026-11-09）
+
+**目标**：不安装、不运行 SCNet 桌面客户端也能拿到 `sk-` key；同时保留原有的客户端凭据读取。
+
+**平台侧可行性（先验证再实现）**
+
+| 步骤 | 端点 | 结果 |
+| --- | --- | --- |
+| 桌面 JWT → 会话 Cookie | `POST /ac/api/auth/loginDesktopClientByToken.action`（表单） | 200 + `Set-Cookie: jsessionid=…; Token=…` |
+| 会话 → 身份 | `GET /acx/user/users/current-user-info` | `{userId: 21909761359, userName: acfb3k2o6j, 138****1234}` |
+| 会话 → key | `POST /acx/llm/api-key/createActivityApiKey`（**JSON `{}`**） | 200，`sk-…`（43 字符），与客户端落盘的 key 相同 |
+| key → 对话 | `POST /api/llm/v1/chat/completions` | 200，模型回「收到」 |
+
+关键否定结论（均已复现，写入 `docs/scnet-api.md` §9）：
+
+- JWT **不能**当 Cookie/头用（`Token: <jwt>`、`Cookie: Token=<jwt>` 均 401）；
+- 微信二维码接口对任何非微信请求**恒 402**（排除 `createBy` 取值、双域名、Referer、
+  GET/POST、`WCOA_TS`、`Accept`、OAuth2 `service` 等 20 余种组合），因此插件**不画假码**；
+- `sso/login` 响应带 `X-Frame-Options: sameorigin`，**不能**被设置页 iframe 内嵌。
+
+**实现形态**
+
+| 文件 | 职责 |
+| --- | --- |
+| `lib/scnet-platform.js` | 平台接口封装：`exchangeJwt` / `resolveSession` / `ensureApiKey` / `logout` / 会话文件路径 |
+| `lib/scnet-web-login.js` | 网页短信登录：图形验证码、发码（含 `1004` 判定）、提交、错误码映射 |
+| `lib/scnet-login.js` | 状态机 `idle/pending/authorized/failed/expired`、会话落盘（0600）、key 缓存 6 天与自动重换 |
+| `lib/index.js` | `credentialSource: auto\|client\|login`；异步 `resolveCredential()`；6 条登录路由 |
+| `lib/client.js` | 设置页「免客户端登录」卡片：手机号 / 图形验证码 / 短信验证码，加检查登录、退出登录 |
+
+**验证记录**
+
+1. 单元（不联网，桩 `fetch`）：`.research/verify/login-unit.mjs` — 11 次请求覆盖
+   登录 → 换 key → 退出；断言密码以密文提交、会话文件 0600、文件内无密码、
+   6 天内不重复换 key、新实例能读回同一份会话。
+2. 真实 HTTP 路由（隔离实例 11261，真实平台）：
+   ```text
+   GET  /status          → credential.source=client-file login.phase=idle
+   POST /login/captcha    → ok=true  image=data:image/jpeg;base64,…
+POST /login/sms        → 未填图形验证码时平台真实返回 3002 signature failed
+POST /login/submit     → 需要真实验证码，留给用户本机登录时确认
+   POST /logout           → ok=true  phase=idle
+   ```
+3. 三种凭据来源在真实上游上逐条真跑（headless，隔离 `DSH_HOME`）：
+   ```text
+   credentialSource=login   （只有 scnet-session.json，无客户端凭据） → 「甲」
+   credentialSource=client  （只有客户端凭据，无会话文件）           → 「乙」
+   credentialSource=auto                                              → 「丙」
+   ```
+4. key 自动重换：把会话文件的 `apiKey` 清空、`expiresAt` 设到 2020 年，
+   再发一条请求 → 平台重新换到 key（43 字符、新 expiresAt），请求成功。
+5. 会话失效：把 `Token` Cookie 改成垃圾值 → 请求如实失败，诊断快照写
+   `credential.source: "unavailable"`、`login.phase: "expired"`、
+   `error: "平台会话已过期，请重新登录"`，日志同步给出原因。
+6. 桩件回归：`.research/verify/client-sim.mjs`（section 注册、渲染文本、
+   含「免客户端登录 / 发送短信验证码 / 先取图形验证码 / 当前凭据来源」、
+   点击刷新 POST）。
+7. 自检脚本：`node tools/check.mjs --live` → 凭据来源、客户端目录、会话文件、
+   账号、上游 `/models`（33 个）全绿。
+
+**顺手修掉的一个真实缺陷**：DSH 的 `resolveProviderAuth` 把
+`provider.auth.apiKey.resolve()` 的返回值当作最终结果，返回 `undefined` 会让
+`applyAuth` 抛 `Provider is not configured: scnet` —— 这句误导性报错会把「没凭据」
+伪装成「插件没装好」。现已改为始终返回对象（无 key 时给空 auth），
+报错变成如实的 `No API key for provider: scnet`，同时日志与状态文件给出真实原因。
+
+### 10.8 修正：发码 1004 被误报为失败（v0.3.1，2026-11-09）
+
+**用户反馈**：短信发送成功了，插件却报 `mobile phone number exist`，填入验证码后能正常登录。
+
+**根因**：平台把「手机号已注册」用 `code: "1004"` 返回，并且**把它当成功**。平台登录页原文：
+
+```js
+// /ui/acm/assets/Login-*.js
+tt({mobilephoneNum:e,captcha:…}).then(c=>{
+  if((c.code==="0"||c.code==="1004")&&(K.value=!0,$.value=!0,…))   // ← 两个码都算成功
+  if(c.code==="0"){T.value="phone";L.value=!0;return}                // 未注册 → 走注册+登录
+  if(c.code==="1004"){T.value="quick";k||(L.value=!1);return}        // 已注册 → 走快捷登录
+  …
+})
+```
+
+插件 v0.3.0 只认 `code === '0'`，于是把正常的 1004 当成了失败，并把平台文案
+`mobile phone number exist` 原样透出——对登录来说这是彻头彻尾的误报。
+
+**修复**：
+
+1. `SMS_OK_CODES = new Set(['0','1004'])`，两者都返回 `{ok:true, registered: code==='1004'}`；
+2. 发码请求补上平台前端同形状的 `t` / `sn` / `captcha`（md5 + 时间戳 + 随机串），
+   缺它们会偶发 `3002 signature failed`；
+3. 发码错误码单独映射（`mapSmsError`）：`1005`→发送过频、`1009/3002`→验证码不对、
+   `1010`→虚拟号；UI 按原因给不同提示，并在验证码类错误后自动刷新图形码。
+
+**同时按用户要求收窄产品面**：去掉账号密码登录与扫码/回填 token 两条通道，只保留短信登录。
+理由：密码要经过插件进程；扫码接口 402 且回填 token 需要手工搬运凭据。
+
+**验证**：
+
+```text
+node .research/verify/login-unit.mjs
+  免客户端短信登录单元验证通过：
+    · 请求 12 次，覆盖取码/发码/登录/换 key/退出
+    · 1004（手机号已注册）判为成功，不再误报
+    · 会话文件 0600，状态与落盘文件都不含验证码/密码
+```
+
+真实平台发码（本机手机号，未填图形验证码）：
+
+```text
+[不带 captcha 答案] -> {"ok":false,"reason":"captcha-invalid","code":"3002","message":"signature failed"}
+```
+
+——说明「缺图形验证码 → 3002」的映射也是对的；填对验证码后平台返回的 1004 已被判为成功。
+
+设置页真机渲染（隔离实例 11261，Edge 无头）：只剩「手机号 / 图形验证码 / 发送短信验证码 /
+6 位短信验证码 / 登录」，控制台无报错，刷新模型链路仍正常。
+
+**安全边界**
+
+- 会话文件 `$DSH_HOME/scnet-session.json` 以 0600 创建；退出登录即删除。
+- 插件**不接收账号密码**：只走短信验证码；验证码只在本次请求里出现一次，不落盘、不进日志、不返回前端。
+- 所有 HTTP 响应与诊断快照只含掩码（`sk-NTM4L…MjM=`），无 Cookie、无密码。
+
+**未覆盖 / 明确不做**
+
+- 插件内微信扫码（见上，平台 402 硬限制）。
+- 账号密码登录：平台支持（RSA 加密后提交），但密码要经过插件进程，**主动不做**。
+- 用真实短信走通 `sso/auth/login.action` 的**成功**分支：端点、发码、错误码均已实测，
+  但成功分支需要用户真实验证码，留给本机登录时确认
+  （失败分支已实测；成功后拿 `Token` Cookie 的收尾逻辑已按平台前端行为实现）。

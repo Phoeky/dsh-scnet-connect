@@ -3,21 +3,23 @@
  * dsh-scnet-connect 自检脚本（不依赖 DSH 运行时，可单独跑）
  *
  * 用法：
- *   node tools/check.mjs            # 静态检查：免费模型发现、凭据、账号
+ *   node tools/check.mjs            # 静态检查：凭据来源、模型目录、账号、登录态
  *   node tools/check.mjs --live     # 额外向上游发一次 GET /models（不消耗 token）
  *
- * 输出不会包含 API Key 明文。
+ * 输出不会包含 API Key / Cookie 明文。
  */
+
+import fs from 'node:fs';
 
 import { DEFAULT_BASE_URL, buildModel, modelLabel } from '../lib/scnet-models.js';
 import {
   maskKey,
   readClientAccount,
   readClientCatalog,
-  readPlatformAccessToken,
   resolveApiKey,
 } from '../lib/scnet-credential.js';
 import { fetchGatewayModels, pickFreeModels } from '../lib/scnet-catalog.js';
+import { sessionFilePath } from '../lib/scnet-platform.js';
 
 const live = process.argv.includes('--live');
 
@@ -36,7 +38,50 @@ let failures = 0;
 console.log('dsh-scnet-connect 自检');
 console.log('');
 
-console.log('[1/5] 客户端模型目录');
+// ---- [1/5] 凭据来源 --------------------------------------------------------
+console.log('[1/5] 凭据来源');
+let apiKey;
+let source;
+try {
+  const resolved = resolveApiKey({});
+  apiKey = resolved.key;
+  source = resolved.source;
+  ok(`生效来源=${resolved.source} key=${maskKey(resolved.key)}`);
+  if (resolved.file) ok(`文件=${resolved.file}`);
+} catch (error) {
+  // 没有客户端凭据不等于自检失败：免客户端登录模式下这是正常状态。
+  warn(`客户端凭据不可用：${error instanceof Error ? error.message : String(error)}`);
+}
+
+// 免客户端登录的会话文件（只读状态，不验证、不联网）。
+const sessionPath = sessionFilePath({ DSH_HOME: process.env.DSH_HOME });
+if (fs.existsSync(sessionPath)) {
+  try {
+    const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+    const keyed = typeof session.apiKey === 'string' && session.apiKey.length > 0;
+    const leftDays = session.expiresAt
+      ? Math.round((Date.parse(session.expiresAt) - Date.now()) / 86_400_000)
+      : undefined;
+    ok(
+      `免客户端会话=${sessionPath}（来源 ${session.source ?? '?'}${session.account?.userName ? `，账号 ${session.account.userName}` : ''}）`,
+    );
+    ok(`会话里的 key=${keyed ? maskKey(session.apiKey) : '未缓存（下次请求会自动换）'}`);
+    if (leftDays !== undefined) {
+      ok(leftDays >= 0 ? `缓存 key 约剩 ${leftDays} 天（过期会自动重换）` : '缓存 key 已过期（下次请求会自动重换）');
+    }
+  } catch (error) {
+    warn(`免客户端会话文件无法解析：${error instanceof Error ? error.message : String(error)}`);
+  }
+} else {
+  warn(`没有免客户端会话（${sessionPath}）；用客户端凭据时这是正常的`);
+}
+if (!apiKey) {
+  warn('当前没有任何本地 key：需要客户端凭据，或在设置页用「免客户端登录」登录一次');
+}
+
+// ---- [2/5] 客户端模型目录 --------------------------------------------------
+console.log('');
+console.log('[2/5] 客户端模型目录');
 const catalog = readClientCatalog({});
 const free = pickFreeModels(catalog);
 if (catalog) {
@@ -49,8 +94,9 @@ if (catalog) {
   warn('未找到客户端模型目录（~/.sclaw/agent/models.json）；插件会退回内置 SCNet-Max');
 }
 
+// ---- [3/5] 模型描述符 ------------------------------------------------------
 console.log('');
-console.log('[2/5] 模型描述符');
+console.log('[3/5] 模型描述符');
 const models = free.length > 0 ? free : [{ id: 'SCNet-Max', priceLabel: 'free' }];
 for (const meta of models) {
   const model = buildModel({
@@ -64,25 +110,13 @@ for (const meta of models) {
   );
 }
 
+// ---- [4/5] 账号 ------------------------------------------------------------
 console.log('');
-console.log('[3/5] 模型服务凭据');
-let apiKey;
-try {
-  const resolved = resolveApiKey({});
-  apiKey = resolved.key;
-  ok(`来源=${resolved.source} key=${maskKey(resolved.key)}`);
-  if (resolved.file) ok(`文件=${resolved.file}`);
-} catch (error) {
-  failures += 1;
-  fail(error instanceof Error ? error.message : String(error));
-}
-
-console.log('');
-console.log('[4/5] SCNet 客户端账号');
+console.log('[4/5] SCNet 账号');
 const account = readClientAccount();
 if (account?.userName || account?.userId) {
   ok(
-    `账号=${account.userName ?? '-'}${account.userId ? `（ID ${account.userId}）` : ''}${account.mobile ? ` 手机=${account.mobile}` : ''}`,
+    `客户端账号=${account.userName ?? '-'}${account.userId ? `（ID ${account.userId}）` : ''}${account.mobile ? ` 手机=${account.mobile}` : ''}`,
   );
   if (account.tokenExpiresAt) {
     const leftDays = Math.round((Date.parse(account.tokenExpiresAt) - Date.now()) / 86_400_000);
@@ -91,9 +125,8 @@ if (account?.userName || account?.userId) {
 } else {
   warn('未找到客户端账号信息（%APPDATA%\\scnet-client\\config.json）');
 }
-const jwt = readPlatformAccessToken();
-if (!jwt?.expiresAt) warn('未找到平台登录态（不影响模型调用，只影响设置页显示）');
 
+// ---- [5/5] 上游连通性 ------------------------------------------------------
 console.log('');
 console.log('[5/5] 上游连通性');
 if (!live) {
@@ -119,5 +152,5 @@ if (failures > 0) {
   console.log(`自检失败：${failures} 项`);
   process.exitCode = 1;
 } else {
-  console.log('自检通过。');
+  console.log(`自检通过（凭据来源：${source ?? '无'}）。`);
 }

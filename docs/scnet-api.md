@@ -368,7 +368,11 @@ Qwen3-235B-A22B, SCNet-Max, GLM-5.2-Base, Qwen3-Embedding-8B
 1. **未公开 API**：`api.scnet.cn/api/llm/v1` 是客户端内部使用的接口，无公开文档/兼容性承诺；客户端升级（现 4.1.0）可能改路径/协议/模型 id。所有 endpoint、字段都应集中配置，便于升级时改一处。
 2. **"免费"是限时的**：`SCNet-Max` 仅 `priceLabel:"free"` → UI「限时免费」。不要在产品文案承诺永久免费；建议插件在模型描述里如实标注「SCNet 客户端内免费模型（限时）」。
 3. **凭据敏感**：`sk-…` 等同于账号模型服务权限。插件必须：只读、不打印、不写日志、不上传；不要把它写进 `~/.dsh` 明文配置或仓库。读取失败时给出清晰指引（先启动客户端登录一次）。
-4. **不能自建 key**：平台 `acx` 接口需要登录 Cookie（内存态、不落盘），仅凭 `config.json` 的 JWT 会 401。插件只能消费客户端已落盘的 key；换账号/退出登录后文件会变化或消失（文件名=identity hash），需重读目录。
+4. **~~不能自建 key~~（已推翻，见 §9）**：早期结论是「平台 `acx` 接口需要登录 Cookie（内存态、不落盘），仅凭 `config.json` 的 JWT 会 401，插件只能消费客户端已落盘的 key」。**这个结论只对了一半**：JWT 不能直接当 Cookie 用（`Token: <jwt>` 头、`Cookie: Token=<jwt>` 都是 401），但 JWT 可以通过平台自己的接口换到真正的会话 Cookie：
+   - `POST /ac/api/auth/loginDesktopClientByToken.action`（表单 `desktopToken=<jwt>&sensors_anon_id=&type=tokenLogin`）→ 200 + `Set-Cookie: jsessionid=…; Token=…`；
+   - 拿到 Cookie 后 `POST /acx/llm/api-key/createActivityApiKey`（**必须 `Content-Type: application/json` + body `{}`**）即可拿到 `sk-` key，实测与客户端落盘的 key 是同一个。
+
+   因此「免客户端登录」在平台侧是成立的，实现见 §9 与 `lib/scnet-platform.js` / `lib/scnet-web-login.js`。
 5. **账号/权限门槛**：账号停用（`API010013`，文案「您的账号已停用…」）、模型服务未开通（客户端会自动 authorize；外部无法代劳）都会导致 401/不可用。
 6. **JWT 有效期**：`config.json.accessToken` 的 `expireTime` 是会话级（本机示例 ≈ 2026-11-15）。它不影响 sk-key 调用；但客户端刷新 key 需要有效会话，故长期不用客户端可能导致客户端侧无法自动续期（届时重新登录即可）。
 7. **并发**：当前实测 16 并发无 429，但平台有 `10007/REQUEST_CONCURRENCY_CONFLICT`、`10011/LIMIT_BURST_RATE` 错误码。插件默认并发 ≤2–4，遇 429/10007 退避重试并提示。
@@ -389,3 +393,133 @@ Qwen3-235B-A22B, SCNet-Max, GLM-5.2-Base, Qwen3-Embedding-8B
 2. **客户端主进程没有为模型提供本地 HTTP 端口**（没有 `listen` 的 LLM 服务）。唯一与"本地端点"有关的是 dev 构建的 `dev.http-endpoint.attach/readback`（临时把 `scnet-llm` 指向 loopback fixture，用于开发调试，正式构建不可用）。
 3. **真实链路**：渲染层 UI → 主进程 pi agent 运行时（`app.asar` 内 `openai-completions` provider，`createScnetModelStream` 包一层鉴权 `fetch`）→ **HTTPS 直连 `https://api.scnet.cn/api/llm/v1/chat/completions`**。因此对 DSH 插件而言，最稳的接入点就是**同样的 HTTPS OpenAI 兼容直连**（§1），完全绕开客户端 UI/RPC。
 4. **asar 中的 `scnet-max`**：主进程 `dist-electron/main/index.js` 有 3 处（模型 id 特判、参数上限特判、input 模态集合）；渲染层有 3 个 chunk（`dist/static/js/async/9x.361426ac1e.js`、`9.4d8ee17dc5.js`、`vq.f6f428b12f.js`，用于会话任务埋点/模型选择器）。它们只是"模型目录/UI 逻辑"，不是 endpoint 定义；endpoint 由 `baseUrl` 常量 + `models.json` 决定（证据 E2）。
+
+---
+
+## 9. 免客户端登录（零客户端路径，v0.3.0 起）
+
+目标：**不安装、不运行 SCNet 桌面客户端**也能拿到 `sk-` key。
+
+### 9.1 平台登录态到底是什么
+
+模型网关（`api.scnet.cn/api/llm/v1`）只认 `Authorization: Bearer sk-…`，而 `sk-`
+只能由平台（`www.scnet.cn`）签发；平台认的是登录时下发的**一对 Cookie**：
+
+| Cookie | 含义 | 实测说明 |
+| --- | --- | --- |
+| `jsessionid` | 平台会话 | 登录后 32 位十六进制 |
+| `Token` | 平台令牌 | 登录后 48 字符；**不是** `config.json` 里那个 JWT |
+
+踩过的坑（都已实测复现）：
+
+- `Token: <jwt>` 请求头 → 401 `{"code":"401","msg":"用户未登录!"}`
+- `Cookie: Token=<jwt>` → 同样 401（JWT 不是 Cookie 值）
+- 只补 `source: Electron` / `version: 4.1.0` 等客户端头 → 仍 401，Cookie 缺一不可
+
+### 9.2 三条登录通道（全部实测）
+
+**A. 桌面 JWT → 会话 Cookie（`lib/scnet-platform.js` 的 `exchangeJwt`）**
+
+```text
+POST https://www.scnet.cn/ac/api/auth/loginDesktopClientByToken.action
+Content-Type: application/x-www-form-urlencoded; charset=UTF-8
+body: desktopToken=<jwt>&sensors_anon_id=&type=tokenLogin
+→ 200 {"code":"0","data":{userName,id,X-Jwt-Access-Token,…}}
+   + Set-Cookie: jsessionid=…; Token=…
+```
+
+注意：**必须是表单编码**。发 JSON 会得到
+`{"msg":"params not enough: [desktopToken] is null","code":"1003"}`。
+
+**B. 网页短信登录（`lib/scnet-web-login.js`，插件只用这一条）**
+
+端点和参数取自平台自己的前端（`/ui/acm/index.html` → `assets/Login-*.js`）：
+
+```text
+POST /sso/captcha.action                     → {"code":"0","data":"data:image/jpeg;base64,…"}
+POST /sso/sendRegisterMessageCode.action     → 发短信验证码（必须带 captcha）
+POST /sso/auth/login.action                  → {"code":"0","data":"<跳转地址(带 ticket)>"}
+    表单：service（必填，= <平台>/ac/api/auth/loginSsoRedirect.action）、originalUrl、
+          sensorsAnonId、captcha、mobilephoneNum(+86…)、messageCode、mode=2
+```
+
+**发码成功判定（重要）**：平台前端对 `/sso/sendRegisterMessageCode.action` 写的是
+`validateCode: ["0","1004"]`，即 `code === "0"` **或** `code === "1004"` 都算成功。
+`1004` 的语义是「该手机号已注册」——对登录来说完全正常（平台会切到「快捷登录」分支）。
+把 `1004` 当失败是本插件 v0.3.0 的一个误报，已修正。
+
+发码还要带 `t` / `sn`（平台用 `et(phone)` 算的 md5 + 时间戳 + 随机串）。实测不是强校验，
+但缺了会偶发 `3002 signature failed`，所以插件照抄同样形状的值。
+
+**账号密码登录（平台支持，但本插件不实现）**：平台要求把密码用它的公钥做
+**RSA/PKCS#1 v1.5** 加密后以 base64 提交（公钥硬编码在 `/ui/acm/assets/rsa-encry-*.js`，
+512 位 → 定长 88 字符，Node 用 `crypto.publicEncrypt` + `RSA_PKCS1_PADDING`）。
+接口本身可用，但密码必须经过插件进程，收益低于风险，因此插件只保留短信登录。
+
+错误码实测：
+
+| 场景 | 返回 |
+| --- | --- |
+| 账号或密码错 | `{"msg":"Username or password is incorrect","code":"401"}` |
+| 关键字段缺失 | `{"msg":"Invalid parameters","code":"1005"}` — **与密码错误同一个码**，所以插件统一按「登录被拒」提示 |
+| 短信验证码错/过期 | `{"code":"1009"…}` / `{"code":"3002","msg":"signature failed"}` |
+| 登录成功 | `data` 是带 `ticket` 的跳转地址；GET 它才会把 `Token` Cookie 落到当前会话 |
+
+**C. 微信扫码（插件里做不到，如实说明）**
+
+- `POST /sso/getQRcodeUrl.action` 能拿到 `{url, key, ts}`（200）
+- 插件不提供扫码通道，也不提供「回填 token」通道（两者都需要用户手工搬运凭据，体验与安全性都更差）。
+
+### 9.3 用会话换 key
+
+```text
+POST https://www.scnet.cn/acx/llm/api-key/createActivityApiKey
+Cookie: jsessionid=…; Token=…
+Content-Type: application/json      ← 必须是 JSON！表单会得到 405
+body: {}
+→ {"code":"0","data":{"apiKey":"sk-…","baseUrl":"https://api.scnet.cn/api/llm/v1",…}}
+```
+
+实测这个 key 与客户端落盘的那个**完全相同**，所以免客户端登录不会在多处造出不同 key。
+
+其它已实测可用的 Cookie 侧接口：
+
+| 用途 | 接口 | 备注 |
+| --- | --- | --- |
+| 会话/身份 | `GET /acx/user/users/current-user-info?includeToken=true&refresh=true` | 401 = 会话失效 |
+| 列出 key | `POST /acx/llm/api-key/query` | body 用 `{"createUser":"<userId>"}`；用 `accountId` 查不到 |
+| 取 key 明文 | `GET /acx/llm/api-key/detail?id=<id>` | |
+| 退出 | `GET|POST /acx/user/users/logout` | |
+
+### 9.4 为什么不做「插件内二维码」
+
+`GET https://www.scnet.cn/sso/wx/qrcodeLogin.action?oauthKey=<key>:<ts>:<createBy>`
+对任何非微信客户端请求**恒返回 402**：
+
+```json
+{"status":402,"error":"Payment Required","message":"No message available","path":"/sso/wx/qrcodeLogin.action"}
+```
+
+已排除的因素（都实测过）：`createBy` 取 `scnet/sso/web/mall/www/空`、两个域名
+（`www.scnet.cn`、`www.hpccube.com`）、带/不带 `Referer`、GET/POST、带/不带
+`WCOA_TS` 与 `jsessionid`、`Accept: image/*`、OAuth2 `authorize` 流程下的 `service`。
+平台前端 JS 里拼二维码地址用的 `createBy` 变量在页面中**根本没有赋值**
+（`loginObj.createBy: ""`），说明该页面模板已被改成按网关透传。
+
+所以设置页**不给假承诺**：只提供短信登录这一条通道。
+
+### 9.5 插件的落盘与生命周期
+
+- 会话文件：`$DSH_HOME/scnet-session.json`（0600，`open(…,'w',0o600)` 后 rename）
+
+  ```json
+  { "cookies": {"jsessionid":"…","Token":"…"}, "apiKey": "sk-…", "baseUrl": "…",
+    "account": {"userId":"…","userName":"…"}, "obtainedAt":"…","keyedAt":"…",
+    "expiresAt":"…","source":"web|jwt" }
+  ```
+
+- key 缓存 6 天；过期或被清空时，下一次请求自动用 Cookie 重新向平台换 key（已实测）。
+- 会话失效 → 状态文件写 `credential.source: "unavailable"`、`login.phase: "expired"`，
+  设置页提示「平台会话已过期，请重新登录」。
+- 密码只在本进程内存里存在一次（加密后提交），**不落盘、不进日志、不返回给前端**。
+- Cookie/key 等价于账号权限：状态路由与设置页只给掩码，诊断文件不含密文。

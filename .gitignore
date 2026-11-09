@@ -2,3 +2,6 @@ node_modules/
 .research/
 *.log
 .DS_Store
+# 本机排障产物（沙箱 ACL 备份、外部工具缓存），不应入库
+.acl-recovery/
+.workbuddy/

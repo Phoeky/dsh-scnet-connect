@@ -51,14 +51,16 @@ bridge，也没有 loopback shim —— 只有一个「发现本机凭据 + 发�
 
 ## 功能
 
-- **零配置**：自动发现本机 SCNet 客户端的登录凭据，不需要手动填 Key。
+- **两种凭据来源**：默认自动读取本机 SCNet 客户端的登录凭据；也可以在设置页**免客户端登录**
+  （手机号 + 短信验证码），完全不装、不运行客户端（见[免客户端登录](#免客户端登录不装客户端也能用)）。
 - **自动发现全部免费模型**：不再写死 `SCNet-Max`。插件扫描客户端模型目录里
   `priceLabel=free` 的条目并全部注册（客户端目录变更后 60 秒内自动生效）。
 - **设置页面板**：`设置 → SCNet 超算互联网`，显示账号（用户名 / ID / 脱敏手机号）、
   登录态剩余天数、凭据来源与 Key 掩码、已注册模型及其上下文/输出上限，并提供
-  **刷新模型**（重新读目录 + 用 `GET /models` 校验可用性）。
-- **免 Key 复制**：Key 只留在 SCNet 客户端自己的数据目录里，插件每次请求时读取；
+  **刷新模型**、**登录/退出**、**检查登录**。
+- **免 Key 复制**：Key 由插件自己读或自己换，用户全程不碰 `sk-` 字符串。
   客户端轮换 Key 后无需重启 DSH。
+- **会话失效会自己换 key**：缓存 6 天的 key 过期或丢失时，下一次请求自动用平台会话重换。
 - **工具调用**：DSH 本地工具（`read` / `write` / `edit` / `pwsh` …）由 DSH 执行，
   模型负责产生结构化 `tool_calls`（已实测通过）。
 - **思考等级**：插件把 DSH 的思考等级**原样**映射到上游 `reasoning_effort`
@@ -66,18 +68,30 @@ bridge，也没有 loopback shim —— 只有一个「发现本机凭据 + 发�
 - **图片输入**：向 DSH 声明模型接受图片（跟随客户端目录的 `input` 字段）。
 - **无需 shim**：标准 OpenAI 端点直连，少一层故障点。
 - **可观测**：启动后写一份 `$DSH_HOME/scnet-connect-status.json` 诊断快照
-  （注册状态、模型元数据、账号、凭据来源；**不含 Key 明文**），卸载或进程退出时会被
-  标记为 `registered: false`（不会被误读成「插件仍在注册」）。
+  （注册状态、模型元数据、账号、凭据来源、登录状态；**不含 Key / Cookie / 密码**），
+  卸载或进程退出时会被标记为 `registered: false`（不会被误读成「插件仍在注册」）。
 
 ---
 
 ## 安装
 
-### 1. 前置：本机 SCNet 客户端已登录
+### 1. 选一种凭据来源
 
-装好 SCNet 客户端并登录账号，**正常发起过至少一次模型对话**（客户端会自动在平台上
-创建 model-service API Key 并落盘到 `~/.sclaw/agent/scnet-credentials/`，同时把平台
-模型目录写到 `~/.sclaw/agent/models.json`）。之后客户端可以关掉。
+| 方式 | 需要装 SCNet 客户端吗 | 说明 |
+| --- | --- | --- |
+| **客户端凭据**（默认） | 需要，登录过一次即可，之后可以关掉 | 读 `~/.sclaw/agent/scnet-credentials/` |
+| **免客户端登录** | **不需要** | 在设置页用平台账号登录，插件自己换 key |
+
+免客户端登录的细节与实测结论见 [`docs/scnet-api.md` §9](docs/scnet-api.md)。
+
+如果走客户端：装好 SCNet 客户端并登录账号，**正常发起过至少一次模型对话**
+（客户端会自动在平台上创建 model-service API Key 并落盘到
+`~/.sclaw/agent/scnet-credentials/`，同时把平台模型目录写到
+`~/.sclaw/agent/models.json`）。之后客户端可以关掉。
+
+如果走免客户端：直接看第 2、3 步，装完插件后在设置页登录即可，
+**不需要预先安装客户端**。模型目录会退化为内置目录（至少 `SCNet-Max`），
+在设置页登录成功后会自动刷新。
 
 ### 2. 安装插件
 
@@ -107,7 +121,9 @@ DSH 的 loader 监听 profile 的补丁层变化：**改动一下 profile 的 `c
   "registered": true,
   "provider": "scnet",
   "providerName": "超算互联网 SCNet",
+  "credentialSource": "auto",
   "account": { "userName": "acfb3k2o6j", "userId": "21909761359", "mobile": "135****1024", "loggedIn": true },
+  "login": { "phase": "idle", "hasClientCredential": true, "sessionFile": "C:\\Users\\<你>\\.dsh\\scnet-session.json" },
   "catalog": { "source": "client-catalog", "gateway": { "ok": true, "count": 33 } },
   "models": [{ "id": "SCNet-Max", "name": "SCNet-Max · 免费", "contextWindow": 262144, "maxTokens": 32768 }],
   "credential": { "source": "client-file", "maskedKey": "sk-NTM4L…MjM=" }
@@ -117,7 +133,44 @@ DSH 的 loader 监听 profile 的补丁层变化：**改动一下 profile 的 `c
 ### 4. 使用
 
 - 模型：在 DSH 的模型选择器里选 **「超算互联网 SCNet → SCNet-Max · 免费」**。
-- 设置：`设置 → SCNet 超算互联网`，可看账号与模型、点「刷新模型」。
+- 设置：`设置 → SCNet 超算互联网`，可看账号与模型、点「刷新模型」、登录/退出。
+
+---
+
+## 免客户端登录（不装客户端也能用）
+
+`设置 → SCNet 超算互联网 → 免客户端登录`：
+
+| 通道 | 怎么用 | 前提 |
+| --- | --- | --- |
+| **手机验证码** | 填手机号 → 取图形验证码 → 发送短信 → 填 6 位短信码 → 登录 | 能收短信 |
+
+登录成功后：
+
+- 会话（Cookie）与 `sk-` key 一起写到 `$DSH_HOME/scnet-session.json`（权限 0600）；
+- 面板显示「已登录 + 账号 + Key 掩码 + 剩余天数」；
+- 「检查登录」验证平台会话是否还有效，「退出登录」清掉本地会话并尽力通知平台。
+
+**为什么只有短信**：
+
+- 账号密码要把密码交给插件进程（平台要求 RSA 加密后提交），收益低于风险，因此不做；
+- 微信扫码接口对任何非微信客户端请求**恒返回 402**，插件拿不到二维码
+  （复现与排除过程见 [`docs/scnet-api.md` §9.4](docs/scnet-api.md)）。
+
+插件不会画一个假码、也不会假装能收密码，只保留一条真能走通、且不把密码交出去的通道。
+
+想让凭据来源固定下来，在 profile 的 `cordis.patch.yml` 里写：
+
+```yaml
+- id: scnet-connect
+  name: dsh-scnet-connect
+  config:
+    credentialSource: login   # auto（默认）| client | login
+```
+
+- `auto`：有客户端凭据就用客户端，否则用设置页登录的会话；
+- `client`：只认客户端凭据（设置页登录不生效）；
+- `login`：只认设置页登录（适合完全没装客户端的机器）。
 
 ---
 
@@ -194,14 +247,25 @@ $env:DSH_TOOLS_MODE = 'native'
 
 ### 设置页接口
 
-设置页卡片读的是插件自己挂在宿主 web 服务上的两条路由（只在本机回环上可达）：
+设置页卡片读的是插件自己挂在宿主 web 服务上的几条路由（只在本机回环上可达）：
 
 ```powershell
-# 只读状态（账号 / 凭据掩码 / 模型列表）
-curl.exe http://127.0.0.1:11256/plugins/dsh-scnet-connect/status
-# 刷新模型（重读客户端目录 + 网关校验），返回刷新后的同一份状态
-curl.exe -X POST http://127.0.0.1:11256/plugins/dsh-scnet-connect/refresh
+$b = 'http://127.0.0.1:11256/plugins/dsh-scnet-connect'
+
+# 只读状态（账号 / 凭据掩码 / 模型列表 / 登录状态）
+curl.exe "$b/status"
+# 刷新模型（重读目录 + 网关校验），返回刷新后的同一份状态
+curl.exe -X POST "$b/refresh"
+
+# 免客户端登录
+curl.exe -X POST "$b/login/captcha"                      # 取图形验证码（data URL）
+curl.exe -X POST "$b/login/sms" -H 'content-type: application/json' -d '{\"phone\":\"138…\",\"captcha\":\"1234\"}'
+curl.exe -X POST "$b/login/submit" -H 'content-type: application/json' -d '{\"phone\":\"138…\",\"smsCode\":\"123456\"}'
+curl.exe -X POST "$b/validate"                           # 会话是否仍有效
+curl.exe -X POST "$b/logout"                             # 退出并删除本地会话
 ```
+
+所有响应都不含 Key / Cookie / 密码原值（只给掩码），登录类接口会顺带回一份新的 `status`。
 
 ---
 
@@ -227,8 +291,11 @@ Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-status.json" -ErrorAction Silen
 | --- | --- |
 | 模型选择器里没有「超算互联网 SCNet」 | 插件未装配：确认 `dsh plugin --profile desktop add ...` 成功、profile 的 `dsh.profile.bundles` 里有 `dsh-scnet-connect`，然后按上文「让运行中的 DSH 生效」触发热重载或重启 DSH。 |
 | 设置页没有「SCNet 超算互联网」 | 浏览器侧 bundle 需要 DSH `0.2.2` 及以上的 `settings.section` slot；旧版本只有模型 provider，没有设置卡片。确认 `设置` 里能看到其它插件（如插件市场）的 section。 |
-| 模型列表为空 / 只有兜底 `SCNet-Max` | 客户端目录 `~/.sclaw/agent/models.json` 不存在或没有 `priceLabel=free` 的条目：打开 SCNet 客户端登录并正常发一条消息，然后点「刷新模型」。 |
-| `SCNet 模型服务凭据不可用（...）` | 本机没有可用的 model-service Key：打开 SCNet 客户端登录并正常发一条消息，让客户端创建 Key；或在插件配置里填 `apiKey`。 |
+| 模型列表为空 / 只有兜底 `SCNet-Max` | 客户端目录 `~/.sclaw/agent/models.json` 不存在或没有 `priceLabel=free` 的条目：打开 SCNet 客户端登录并正常发一条消息，然后点「刷新模型」；免客户端模式下登录成功会自动刷新目录。 |
+| `SCNet 模型服务凭据不可用（...）` | 本机没有可用的 model-service Key：打开 SCNet 客户端登录并正常发一条消息，让客户端创建 Key；或在设置页用免客户端登录；或在插件配置里填 `apiKey`。 |
+| 报错 `Provider is not configured: scnet` | 只可能出现在 **0.2.x** 老版本（0.3.0 起改为如实报「缺 key」并附原因）。升级插件即可。 |
+| 设置页登录提示「平台会话已过期」 | 平台侧会话失效：在设置页重新登录一次即可（不需要客户端）。状态文件里 `login.phase` 会是 `expired`。 |
+| 登录提示「账号或密码不正确（或必填项为空）」 | 平台对「密码错」和「必填项缺失」返回同一个码 `1005`，所以两种原因合并提示；先确认账号/密码没填错、手机号是纯 11 位。 |
 | 发送消息报 `Authentication Failed`（401） | Key 已失效/被平台撤销：重新打开客户端发一条消息让客户端刷新 Key（或重新登录），然后重试。 |
 | `模型服务尚未开通` / 账号停用 | 这是 SCNet 平台账号状态问题（需要账号主在平台侧开通模型服务/解除停用），插件无法代劳，按平台提示处理。 |
 | 输出被截断 / 上下文不够 | 调大 `maxTokens` / `contextWindow`（见配置），或换更长上下文场景。 |
@@ -239,13 +306,19 @@ Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-status.json" -ErrorAction Silen
 
 ## 安全与隐私
 
-- 插件**只读** SCNet 客户端自己写入的凭据文件与账号信息，不写客户端数据、不改平台账号。
+- 客户端模式下插件**只读** SCNet 客户端自己写入的凭据文件与账号信息，不写客户端数据，
+  不改平台账号。
 - 默认路径下 API Key 只留在 SCNet 客户端目录里：插件不把 Key 写进 DSH 配置、日志或
   诊断文件，诊断快照与设置页接口里只有 `sk-xxxxxxxx…xxxx` 形式的掩码。
+- **免客户端登录**会在 `$DSH_HOME/scnet-session.json` 里存平台会话 Cookie 与 `sk-` key，
+  该文件以 **0600** 创建（仅当前用户可读），退出登录时删除。这两样东西**等价于你的
+  账号权限**：不要复制给他人、不要提交进仓库。
+- 插件**不接收账号密码**：免客户端登录只走短信验证码，密码从不经过插件进程。
+  短信验证码只在本次登录请求里出现一次，不写日志、不回显、不进诊断文件。
 - **例外**：如果你用 `apiKey` 配置项显式指定 Key，它以明文存在于 profile 的
   `cordis.patch.yml` 中（以及你填它的任何地方），请自行控制该文件权限。
-- 插件额外挂在宿主 web 服务上的两条路由（`/plugins/dsh-scnet-connect/status`、
-  `/plugins/dsh-scnet-connect/refresh`）只在本机回环地址上可达，且不返回明文密钥。
+- 插件额外挂在宿主 web 服务上的路由（`/plugins/dsh-scnet-connect/*`）只在本机回环地址
+  上可达，且**不返回明文密钥 / Cookie / 密码**。
 - 插件不额外起本地端口、不做代理转发；模型请求由 DSH 进程直接发往 `api.scnet.cn`。
 - 用的是未公开的客户端内部端点，SCNet 客户端升级后协议可能变化；如遇问题请附
   `docs/scnet-api.md` 里的验证脚本输出反馈。
@@ -270,8 +343,11 @@ Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-status.json" -ErrorAction Silen
 ## 开发
 
 ```text
-lib/index.js            # cordis 插件入口：注册 provider、HTTP 状态路由、诊断快照
-lib/client.js           # 浏览器侧：设置页 section（账号 / 模型 / 刷新）
+lib/index.js            # cordis 插件入口：注册 provider、设置页路由、诊断快照
+lib/scnet-login.js      # 免客户端登录的状态机（会话落盘 / 换 key / 失效判定）
+lib/scnet-platform.js   # 平台接口：JWT→会话 Cookie、current-user-info、createActivityApiKey
+lib/scnet-web-login.js  # 网页短信登录：图形验证码、发码、提交、错误码映射
+lib/client.js           # 浏览器侧：设置页 section（账号 / 登录 / 模型 / 刷新）
 lib/scnet-credential.js # 凭据、客户端模型目录、账号信息的只读发现
 lib/scnet-catalog.js    # 免费模型选择 + 缓存 + 网关校验
 lib/scnet-models.js     # 模型描述符 + 思考等级映射
