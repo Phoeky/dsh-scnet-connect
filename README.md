@@ -9,6 +9,8 @@
 - **零客户端**：不装 SCNet 桌面客户端，用手机短信登录即可使用
 - **零配置**：装了客户端的话，自动读凭据、自动发现免费模型
 - **设置页管理**：账号、登录、模型开关都在 DSH 设置里
+- **1M 上下文**：`SCNet-Max` 按平台真实能力声明 `contextWindow: 1048576` / `maxTokens: 131072`（实测 104.5 万 token 输入通过、1.06M 被拒，见 [docs/scnet-api.md](docs/scnet-api.md)）
+- **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）会被归一化成可重试错误，自动退避重试而不是整轮失败
 
 ![设置页](.github/assets/settings.png)
 
@@ -194,8 +196,31 @@ dsh plugin --profile desktop add link:.
 | `inputImages` | `true` | 是否声明接受图片 |
 | `reasoning` | `true` | 是否声明支持思考等级 |
 | `verifyWithGateway` | `true` | 刷新时用 `GET /models` 校验 |
+| `retryOnTransientErrors` | `true` | 把 SCNet「5xx 却标成 `invalid_request_error`」的瞬时抖动改写成可重试的服务端错误（见下） |
 
 </details>
+
+### 关于 `retryOnTransientErrors`
+
+SCNet 在推理实例切换/回收时会返回这种响应：
+
+```json
+HTTP 503
+{"error":{"message":"The model's routing or availability changed while processing the request. Please try again.","type":"invalid_request_error","code":"10008"}}
+```
+
+状态码是 5xx，但响应体 `type` 写的是 `invalid_request_error`。DSH 的错误归类按正则顺序扫描文本，`invalid.?request` 排在 `5xx → SERVER` 前面，于是把它判成 **`INVALID_REQUEST`（不可重试）**，一次退避都不做，本轮直接失败。
+
+插件默认把这层归一化打开：只针对「状态码 ≥ 500 且 `type` 是 `invalid_request_error`」的响应，把 `type` 改写为 `api_error`（状态码与 message 原样保留），让归类落到 `SERVER`，交给 DSH 的 5 次指数退避重试。
+
+刻意不碰的：真正的 `400`（如参数错误 `10013`）、`401/403/402/429`、以及 2xx 流式响应。
+
+实测（本地假网关，前 2 次返回上述 503）：
+
+| 配置 | chat 请求数 | 结果 |
+| --- | --- | --- |
+| `retryOnTransientErrors: false` | 2（无重试） | 失败，`code: INVALID_REQUEST` |
+| `retryOnTransientErrors: true`（默认） | 4（2 次 503 后成功） | 正常完成 |
 
 ---
 
@@ -210,6 +235,7 @@ dsh plugin --profile desktop add link:.
 | 提示「平台会话已过期」 | 在设置页重新登录一次 |
 | 短信收不到 | 确认手机号正确、图形验证码没填错；平台有 60 秒与每小时次数限制 |
 | 上游 429 | 插件不屏蔽限流，降低并发或稍等重试 |
+| 报 `503` + `code: 10008` / `10009` | 平台侧路由抖动。默认会自动重试；若已被手动关掉 `retryOnTransientErrors`，打开它或稍后重发 |
 
 ---
 

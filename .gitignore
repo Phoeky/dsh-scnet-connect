@@ -11,3 +11,6 @@ docs/
 
 # 本地审查/验证用的临时 DSH_HOME 与 schema 快照
 .review/
+
+# pnpm 本地 store（`dsh plugin add link:` 在隔离 profile 里装的临时产物）
+.pnpm-store/
