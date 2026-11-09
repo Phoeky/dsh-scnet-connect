@@ -1,6 +1,6 @@
 {
   "name": "dsh-scnet-connect",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "把 SCNet（超算互联网）的免费模型接入 DeepSeek Harness：可读本机客户端凭据，也可在设置页免客户端登录（账号密码/手机验证码），并在设置页管理账号与模型",
   "type": "module",
   "main": "./lib/index.js",

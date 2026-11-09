@@ -541,3 +541,89 @@ node .research/verify/login-unit.mjs
 - 用真实短信走通 `sso/auth/login.action` 的**成功**分支：端点、发码、错误码均已实测，
   但成功分支需要用户真实验证码，留给本机登录时确认
   （失败分支已实测；成功后拿 `Token` Cookie 的收尾逻辑已按平台前端行为实现）。
+
+### 10.9 修正：退出登录没有真正退出 + 只显示免费模型开关（v0.3.2，2026-11-09）
+
+#### 问题 1：「退出登录」后模型还能用
+
+用户反馈退出登录后调用模型仍然通。查到两个独立原因，都修了。
+
+**原因 A（设计缺陷，主因）**：`auto` 模式的凭据优先级是「客户端凭据 → 登录会话」。
+`/logout` 只清了登录会话，下一次请求于是静默回落到客户端凭据：
+
+```text
+[客户端凭据] source = client-file | key = sk-NTM4L…
+[登录会话]   hasSession = false
+=> 退出登录后模型还通，不是退出没生效，是第 1 步还在供 key
+```
+
+修复：新增持久化的 `suspended` 开关（`$DSH_HOME/scnet-connect-suspended.json`）。
+退出登录后置 true，`resolveCredential()` / `resolveCurrentApiKey()` / `catalogApiKey()`
+三个入口全部短路返回空；`/resume` 或登录成功才清零。
+
+必须落盘：只放内存的话，重启 DSH / 换进程就又活了，「退出」变成一次性假动作。
+实测（同一 `DSH_HOME`，两个不同进程）：
+
+```text
+A) 干净状态                                  → 甲            （成功）
+B) 写 {"suspended":true}                     → 新进程
+C) 新进程跑对话                              → No API key for provider: scnet  （正确拒绝）
+D) 写回 {"suspended":false}                  → 丙            （恢复）
+E) 删掉文件（默认未暂停）                     → 丁            （可用）
+```
+
+**原因 B（真实竞态）**：`signOut()` 没有作废正在飞的 `ensureKey()`。
+退出时若正好有一次换 key 在途，它跑完仍会 `persist()`，把会话文件写回来。
+
+复现与修复前后对比（桩件让平台请求慢 300ms 制造窗口）：
+
+```text
+修复前：平台调用序列 = current-user-info -> logout -> createActivityApiKey   ← 退出后还在换 key
+修复后：平台调用序列 = current-user-info -> logout                            ← 干净
+```
+
+修复方式：引入会话代次 `epoch`，登录/退出都 +1；`ensureKey()` 与
+`finishAuthorization()` 在关键节点比对代次，不一致就丢弃结果。
+
+#### 问题 2：只显示免费模型的开关
+
+- `Config.freeOnly`（默认 `true`）；
+- `createModelCatalog` 支持运行时 `setFreeOnly()`，切完立即丢缓存重建；
+- 新路由 `POST /plugins/dsh-scnet-connect/catalog/free-only`；
+- 设置页「模型」分组里一个复选框，默认勾选。
+
+顺带修掉一个显示 bug：`buildModel()` 是给 provider 用的描述符，**不带** `priceLabel`，
+status 里直接取它会导致免费的 `SCNet-Max` 被标成「计费」。现从 catalog 元数据补齐。
+
+#### 验证
+
+真实浏览器（Edge 无头，隔离实例 11262）逐项点过：
+
+```text
+checkbox 存在            ok
+默认勾选                 ok
+关闭后模型数变多         ok   1 -> 32
+再打开恢复               ok   32 -> 1
+```
+
+停用态 UI：
+
+```text
+显示停用提示             ok
+显示恢复使用按钮         ok
+恢复后停用提示消失       ok
+```
+
+重启后仍保持停用（同一 DSH_HOME 换进程）：
+
+```text
+重启后：suspended=True source=unavailable
+error=已退出登录（本插件已停用）。在设置页重新登录，或点「恢复使用」后再试。
+```
+
+#### 边界说明
+
+`sk-` 是账号级凭据、与 SCNet 桌面客户端共用，平台**没有**吊销接口
+（扫遍 88 个前端 chunk 未发现 delete/revoke api-key 端点）。所以本插件里
+「退出登录」的语义是**停止使用**，而不是「让 key 在平台上失效」——
+真要作废请到 SCNet 平台重置账号凭据。这一点已写进 README。

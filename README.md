@@ -55,6 +55,8 @@ bridge，也没有 loopback shim —— 只有一个「发现本机凭据 + 发�
   （手机号 + 短信验证码），完全不装、不运行客户端（见[免客户端登录](#免客户端登录不装客户端也能用)）。
 - **自动发现全部免费模型**：不再写死 `SCNet-Max`。插件扫描客户端模型目录里
   `priceLabel=free` 的条目并全部注册（客户端目录变更后 60 秒内自动生效）。
+- **只显示免费模型开关**：设置页默认勾选；关掉后会把目录里全部模型都注册出来
+  （按平台计费，插件不拦）。运行时切换，不用改配置、不用重启。
 - **设置页面板**：`设置 → SCNet 超算互联网`，显示账号（用户名 / ID / 脱敏手机号）、
   登录态剩余天数、凭据来源与 Key 掩码、已注册模型及其上下文/输出上限，并提供
   **刷新模型**、**登录/退出**、**检查登录**。
@@ -149,7 +151,24 @@ DSH 的 loader 监听 profile 的补丁层变化：**改动一下 profile 的 `c
 
 - 会话（Cookie）与 `sk-` key 一起写到 `$DSH_HOME/scnet-session.json`（权限 0600）；
 - 面板显示「已登录 + 账号 + Key 掩码 + 剩余天数」；
-- 「检查登录」验证平台会话是否还有效，「退出登录」清掉本地会话并尽力通知平台。
+- 「检查登录」验证平台会话是否还有效。
+
+### 「退出登录」到底做了什么
+
+点「退出登录」会做三件事，缺一不可：
+
+1. 删除 `$DSH_HOME/scnet-session.json`；
+2. 尽力通知平台让会话失效；
+3. **停用整个插件的 Key 供给**（写 `$DSH_HOME/scnet-connect-suspended.json`）。
+
+第 3 条容易被忽略，但必须有：`auto` 模式的优先级是「客户端凭据优先」，只清登录会话的话，
+下一次请求会静默回落到客户端凭据 —— 表现就是「退出登录了，模型还能用」。
+现在退出后**任何来源都不再供 key**，且重启 DSH 后仍保持停用；
+面板会出现「恢复使用」按钮，点它才重新按当前凭据来源供 key。
+
+> 说明：`sk-` key 是**账号级**凭据，和 SCNet 桌面客户端共用，平台也没有提供吊销接口。
+> 所以「退出登录」在本插件里的语义是「停止使用」，而不是「让 key 在平台上失效」。
+> 真要彻底停用，请到 SCNet 平台重置账号凭据。
 
 **为什么只有短信**：
 
@@ -193,6 +212,7 @@ DSH 的 loader 监听 profile 的补丁层变化：**改动一下 profile 的 `c
     inputImages: true
     reasoning: true
     verifyWithGateway: true  # 刷新模型时用 GET /models 校验可用性
+    freeOnly: true           # 只注册 priceLabel=free 的模型（默认开）
 ```
 
 - `modelIds`：想用非免费模型（例如 `GLM-5.3-Flash`、`Kimi-K3`）时填这里，逗号分隔；
@@ -262,7 +282,9 @@ curl.exe -X POST "$b/login/captcha"                      # 取图形验证码（
 curl.exe -X POST "$b/login/sms" -H 'content-type: application/json' -d '{\"phone\":\"138…\",\"captcha\":\"1234\"}'
 curl.exe -X POST "$b/login/submit" -H 'content-type: application/json' -d '{\"phone\":\"138…\",\"smsCode\":\"123456\"}'
 curl.exe -X POST "$b/validate"                           # 会话是否仍有效
-curl.exe -X POST "$b/logout"                             # 退出并删除本地会话
+curl.exe -X POST "$b/logout"                             # 退出登录并停用本插件
+curl.exe -X POST "$b/resume"                             # 恢复使用
+curl.exe -X POST "$b/catalog/free-only" -H 'content-type: application/json' -d '{"freeOnly":true}'
 ```
 
 所有响应都不含 Key / Cookie / 密码原值（只给掩码），登录类接口会顺带回一份新的 `status`。
