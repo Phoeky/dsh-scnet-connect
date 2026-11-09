@@ -18,7 +18,7 @@ import {
   readClientCatalog,
   resolveApiKey,
 } from '../lib/scnet-credential.js';
-import { fetchGatewayModels, pickFreeModels } from '../lib/scnet-catalog.js';
+import { BUILTIN_MODEL, fetchGatewayModels, pickFreeModels } from '../lib/scnet-catalog.js';
 import { sessionFilePath } from '../lib/scnet-platform.js';
 
 const live = process.argv.includes('--live');
@@ -97,7 +97,7 @@ if (catalog) {
 // ---- [3/5] 模型描述符 ------------------------------------------------------
 console.log('');
 console.log('[3/5] 模型描述符');
-const models = free.length > 0 ? free : [{ id: 'SCNet-Max', priceLabel: 'free' }];
+const models = free.length > 0 ? free : [{ ...BUILTIN_MODEL }];
 for (const meta of models) {
   const model = buildModel({
     modelId: meta.id,
