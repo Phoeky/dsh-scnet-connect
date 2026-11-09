@@ -1,0 +1,4 @@
+node_modules/
+.research/
+*.log
+.DS_Store

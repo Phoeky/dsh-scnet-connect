@@ -1,0 +1,44 @@
+{
+  "name": "dsh-scnet-connect",
+  "version": "0.1.0",
+  "description": "把本机 SCNet（超算互联网「计算服务」）客户端里的免费模型 SCNet-Max 接入 DeepSeek Harness",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "scnet",
+    "超算互联网",
+    "model-provider",
+    "scnet-max"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.3 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.1-rc.3 <0.3.0-0",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.2.1-rc.3 <0.3.0-0",
+    "@deepseek-ai/schemastery": ">=3.18.4 <4.0.0",
+    "@earendil-works/pi-ai": ">=1.0.0 <2.0.0"
+  },
+  "scripts": {
+    "check": "node tools/check.mjs"
+  }
+}

@@ -1,0 +1,30 @@
+# dsh-scnet-connect bundle patch
+#
+# 这一行负责把插件本体装进 profile：
+#   id   = loader entry id（也是设置命名空间名）
+#   name = npm 包名（loader 用它 import 入口模块）
+#
+# 模型 provider（默认路由 `scnet`，模型 `SCNet-Max`）由 lib/index.js 在
+# apply() 里通过 ctx.llm.registerAdapter 动态注册，不在这里写 provider 配置
+# —— 避免整块覆盖用户现有的 llm-pi-ai.providers。
+#
+# 全部字段都有默认值，下面留空即表示「零配置」：自动读取本机 SCNet 客户端
+# 的 model-service API Key，自动使用 https://api.scnet.cn/api/llm/v1 与
+# SCNet-Max。需要调整时再取消注释对应字段。
+- insert:
+    - id: scnet-connect
+      name: dsh-scnet-connect
+      config: {}
+      # 全部字段都有默认值，上面留空即可；需要覆盖时把对应字段加进 config。
+      # 可用字段：
+      #   credentialDir / apiKey / baseUrl / modelId / modelName /
+      #   contextWindow / maxTokens / inputImages / reasoning
+        # credentialDir: ''   # 默认 ~/.sclaw/agent/scnet-credentials
+        # apiKey: ''          # 留空 = 自动读客户端凭据
+        # baseUrl: 'https://api.scnet.cn/api/llm/v1'
+        # modelId: 'SCNet-Max'
+        # modelName: ''
+        # contextWindow: 0
+        # maxTokens: 0
+        # inputImages: true
+        # reasoning: true
