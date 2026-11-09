@@ -1,6 +1,6 @@
 {
   "name": "dsh-scnet-connect",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "把 SCNet 模型接入 DeepSeek Harness，可免客户端登录，使用免费模型（SCNet-Max，基座基本可确定为 DeepSeek Flash）",
   "type": "module",
   "main": "./lib/index.js",
