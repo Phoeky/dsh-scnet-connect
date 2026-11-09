@@ -1,6 +1,6 @@
 {
   "name": "dsh-scnet-connect",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "把 SCNet 模型接入 DeepSeek Harness，可免客户端登录，使用免费模型（SCNet-Max，基座基本可确定为 DeepSeek Flash）",
   "type": "module",
   "main": "./lib/index.js",
@@ -12,8 +12,10 @@
   },
   "files": [
     "lib",
+    "tools",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "screenshots.json"
   ],
   "keywords": [
     "dsh-plugin",

@@ -9,10 +9,10 @@
 - **零客户端**：不装 SCNet 桌面客户端，用手机短信登录即可使用
 - **零配置**：装了客户端的话，自动读凭据、自动发现免费模型
 - **设置页管理**：账号、登录、模型开关都在 DSH 设置里
-- **1M 上下文**：`SCNet-Max` 按平台真实能力声明 `contextWindow: 1048576` / `maxTokens: 131072`（实测 104.5 万 token 输入通过、1.06M 被拒，见 [docs/scnet-api.md](docs/scnet-api.md)）
+- **1M 上下文**：`SCNet-Max` 按平台真实能力声明 `contextWindow: 1048576` / `maxTokens: 131072`（实测 104.5 万 token 输入通过、1.06M 被拒；同样的直连调用方式见 [`tools/repro/scnet-chat.mjs`](tools/repro/scnet-chat.mjs)）
 - **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）会被归一化成可重试错误，自动退避重试而不是整轮失败
 
-![设置页](.github/assets/settings.png)
+![设置页](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings.png)
 
 ---
 
@@ -161,7 +161,7 @@ dsh plugin --profile desktop add link:.
 | 只显示免费模型 | 默认开启。关闭后会把目录里所有模型都注册出来（可能产生费用） |
 | 刷新模型 | 重新读模型目录并用网关校验可用性 |
 
-![模型开关](.github/assets/settings-models.png)
+![模型开关](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings-models.png)
 
 ---
 
@@ -199,6 +199,23 @@ dsh plugin --profile desktop add link:.
 | `retryOnTransientErrors` | `true` | 把 SCNet「5xx 却标成 `invalid_request_error`」的瞬时抖动改写成可重试的服务端错误（见下） |
 
 </details>
+
+### 运行时开关与清单位置
+
+| 状态 | 文件 | 说明 |
+| --- | --- | --- |
+| 「只显示免费模型」 | `$DSH_HOME/scnet-connect-preferences.json` | 设置页切换后会记住；**优先级高于配置文件里的 `freeOnly`**。想回到配置文件的值，删掉这个文件 |
+| 「退出登录 / 恢复使用」 | `$DSH_HOME/scnet-connect-suspended.json` | 退出后连客户端凭据一并停用，重启 DSH 仍生效 |
+| 免客户端登录会话 | `$DSH_HOME/scnet-session.json` | 含 Cookie 与 `sk-` key（创建时按 `0600`），退出即删 |
+| 诊断快照 | `$DSH_HOME/scnet-connect-status[.<profile>].json` | 只读排障用，`registered` / 模型 / 掩码 key；文件名带 profile，多个 profile 不会互相覆盖 |
+
+### 关于模型元数据
+
+模型描述符的字段来源是**配置 > 客户端目录 > 内置默认**，但有两处按目录的真实语义读：
+
+- **输入能力**：目录里没写 `input` 就按纯文本处理（不会凭空给陌生模型加图片能力）；
+- **思考等级**：目录里 `thinkingMode: "levels"` 或 `reasoning: true` 才算支持思考。当前 `SCNet-Max` 的目录条目是 `reasoning: false` + `thinkingMode: "levels"` —— 客户端 UI 也是按分等级展示的，所以插件判为支持；
+- **工具调用**：目录标 `toolCalling: false` 的模型仍会注册（DSH 是 agent，无法在描述符里表达「不下发工具」），但设置页会给它打「不支持工具」标，选中前请留意。
 
 ### 关于 `retryOnTransientErrors`
 
@@ -242,13 +259,33 @@ HTTP 503
 ## 安全
 
 - **不接收账号密码**：只走短信验证码，密码从不经过插件。
-- 登录会话存于 `$DSH_HOME/scnet-session.json`（权限 `0600`），退出登录即删除。
+- 登录会话存于 `$DSH_HOME/scnet-session.json`，创建时按 `0600` 打开、退出登录即删除。Windows 上 `chmod` 只切只读位，实际可读性由该目录的 ACL 决定，请自行确认 ACL 没有放开。
 - **这两样东西等价于你的账号权限**：不要复制给他人，不要提交进仓库。
-- 插件只在本机回环地址上暴露设置页路由，且**不返回** Key / Cookie / 验证码明文。
+- 插件只在本机回环地址上暴露设置页路由，响应里**不返回** Key / Cookie / 验证码明文（只给掩码 `sk-NTM4L…MjM=`）。
+- 这些路由当前**没有额外的来源校验**：能访问本机 `127.0.0.1:<port>` 的进程（含本机其他程序）可以读取状态、触发刷新/登出。不要把这个端口通过反向代理暴露到局域网。
 - 若用 `apiKey` 配置项，它以明文存在 profile 的 `cordis.patch.yml` 里，请自行控制权限。
 
 > `sk-` Key 是账号级凭据、与 SCNet 客户端共用，平台没有吊销接口。
 > 所以「退出登录」的语义是**停止使用**，不是让 Key 在平台失效；要作废请到 SCNet 平台重置账号凭据。
+
+---
+
+## 卸载
+
+```bash
+dsh plugin --profile desktop remove dsh-scnet-connect
+```
+
+插件自己的状态文件不会跟着删掉（它们是本机排障/偏好数据，不是包内容），需要时手动清理：
+
+```powershell
+Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-status*.json" -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-suspended.json" -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-preferences.json" -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.dsh\scnet-session.json" -ErrorAction SilentlyContinue
+```
+
+`scnet-session.json` 里有 `sk-` key 与平台 Cookie，不再使用本插件时建议一并删除。
 
 ---
 
@@ -258,6 +295,8 @@ HTTP 503
 - 「免费」是平台侧的**限时**政策，不是永久免费；本插件不提供额度，也不绕过计费。
 - 插件内**不提供微信扫码**（平台二维码接口对非微信客户端恒返回 402）。
 - 用的是未公开的客户端内部接口，SCNet 客户端升级后可能变化。
+- 模型功能要求 DSH `>=0.2.0-rc.1`；**设置页**需要 `0.2.2` 及以上（`settings.section` slot）。低版本上模型照常可用，只是没有设置页卡片，登录要在配置里指定 `apiKey`。
+- 上下文窗口按平台实测值声明 1M，但单次请求的 `prompt + max_tokens` 仍受 1,048,576 总量约束；DSH 的自动压缩阈值通常留有余量，若手动调大压缩阈值，接近上限的长对话可能被上游以 `10013` 拒绝。
 
 ---
 
@@ -265,19 +304,22 @@ HTTP 503
 
 ```bash
 git clone https://github.com/Phoeky/dsh-scnet-connect.git && cd dsh-scnet-connect
-node tools/check.mjs          # 自检：凭据、模型目录、账号
-node tools/check.mjs --live   # 额外请求一次 /models
+node tools/check.mjs            # 自检：凭据、模型目录、账号
+node tools/check.mjs --live     # 额外请求一次 /models
+npm run check:fetch             # 错误归一化 + 归类（离线，无需凭据）
 ```
 
 ```text
 lib/index.js            插件入口：注册 provider、设置页路由
 lib/client.js           浏览器侧：设置页卡片
+lib/scnet-fetch.js      上游 5xx 抖动的错误归一化（可重试）
 lib/scnet-login.js      免客户端登录状态机
 lib/scnet-platform.js   平台接口封装
 lib/scnet-web-login.js  短信登录与验证码
 lib/scnet-catalog.js    模型目录发现与过滤
 lib/scnet-credential.js 客户端凭据读取
 lib/scnet-models.js     模型描述符
+tools/fake-gateway.mjs  本地假网关（前 N 次 chat 返回 503/10008，用于复现重试）
 ```
 
 ## License
