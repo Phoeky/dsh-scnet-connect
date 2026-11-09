@@ -5,3 +5,6 @@ node_modules/
 # 本机排障产物（沙箱 ACL 备份、外部工具缓存），不应入库
 .acl-recovery/
 .workbuddy/
+
+# 内部逆向/验证记录，不随仓库分发
+docs/

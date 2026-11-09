@@ -1,7 +1,7 @@
 {
   "name": "dsh-scnet-connect",
-  "version": "0.3.2",
-  "description": "把 SCNet（超算互联网）的免费模型接入 DeepSeek Harness：可读本机客户端凭据，也可在设置页免客户端登录（账号密码/手机验证码），并在设置页管理账号与模型",
+  "version": "0.4.0",
+  "description": "把 SCNet 模型接入 DeepSeek Harness，可免客户端登录，使用免费模型（SCNet-Max，基座基本可确定为 DeepSeek Flash）",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -12,8 +12,6 @@
   },
   "files": [
     "lib",
-    "docs",
-    "tools",
     "cordis.patch.yml",
     "README.md"
   ],
