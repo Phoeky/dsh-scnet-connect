@@ -342,3 +342,71 @@ printf '用 read 工具读取 F:/code/dsh-scnet-connect/package.json，然后只
 ```
 
 > `.research/verify/` 被 `.gitignore` 排除，其中的 mock、patch、抓包、日志都不入库，也不会带出任何真实 key。
+
+---
+
+## 10. 整改记录（v0.2.0，2026-11-09）
+
+本报告提出的 4 条必修项（QA-1 ~ QA-4）已在本轮修复；同批还按需求调整了模型发现逻辑并新增设置页。
+
+### 10.1 QA-1 思考等级映射
+
+- 改动：`lib/scnet-models.js` 的 `THINKING_LEVEL_MAP` 改为除 `off→none` 外全部恒等透传
+  （`minimal/low/medium/high/xhigh/max` 与上游同名）。
+- 验证：`node -e "import('./lib/scnet-models.js').then(m=>console.log(m.THINKING_LEVEL_MAP))"`
+  → `{off:'none',minimal:'minimal',low:'low',medium:'medium',high:'high',xhigh:'xhigh',max:'max'}`；
+  真实请求仍走通（`medium` 档下发，见 §10.5）。
+
+### 10.2 QA-2 死代码 `lib/scnet-auth.js`
+
+- 改动：删除该文件（`git rm`），仓库内无任何引用；`npm pack` 不再包含它。
+
+### 10.3 QA-3 npm 包缺 docs/tools
+
+- 改动：`package.json` 的 `files` 增加 `docs`、`tools`。
+- 验证：`npm pack --dry-run` 现在列出 `docs/*.md` 与 `tools/check.mjs`、`tools/repro/*`
+  （共 29 个文件，unpacked 221 kB）。
+
+### 10.4 QA-4 卸载后 status 残留 `registered: true`
+
+- 改动：诊断快照加入 `pid`；插件 dispose 时若文件里的 `pid` 是本进程，则改写为
+  `registered: false` + `disposedAt`。不再直接删除：headless 一次性运行退出时也会 dispose，
+  删掉就没法事后排障；按 pid 判断则不会覆盖同一 `DSH_HOME` 下其它 profile 刚写的新快照。
+- 验证（临时 home）：
+  ```text
+  $ printf '只回答两个字：收到' | dsh --profile scnet-e2e --patch patch-multi.yml --json -
+  {"type":"text","text":"收到"} … turn_end completed
+  $ node -e "console.log(require('./home-e2e/scnet-connect-status.json'))"
+  registered: false, disposedAt: 2026-11-09T02:46:41.683Z, pid: 20984
+  ```
+  README 新增「卸载」小节，说明该行为与手动清理方式。
+
+### 10.5 新增：免费模型自动发现（替代写死 SCNet-Max）
+
+- 新模块 `lib/scnet-catalog.js`：读客户端目录 → 取 `priceLabel === 'free'` → 60 s 内存缓存；
+  `refresh()` 强制重读并用 `GET /models` 校验可用性（校验失败不影响本地列表）。
+- `lib/index.js` 按目录条目逐个 `buildModel`，注册全部免费模型；新增 `modelIds`
+  配置用于显式指定（可含非免费模型），旧 `modelId` 保留为单模型别名。
+- 验证（本机当前只有 SCNet-Max 免费）：
+  ```text
+  $ node tools/check.mjs
+  ✓ 共 32 个模型，其中免费 1 个
+  ✓ 免费模型：SCNet-Max
+  ```
+  多模型路径用 `modelIds: 'SCNet-Max,GLM-5.3-Flash'` 验证：请求返回「收到」，
+  status 里两条模型分别是 `SCNet-Max · 免费` 与 `GLM-5.3-Flash`。
+
+### 10.6 新增：设置页插件卡片（账号 / 模型 / 刷新）
+
+- 宿主：`/plugins/dsh-scnet-connect/status`（GET）、`/plugins/dsh-scnet-connect/refresh`（POST），
+  只返回掩码与元数据，不返回 key。
+- 浏览器侧：`lib/client.js`（`dsh.client` + `exports["./client"]`），在 `settings.section`
+  上注册「超算互联网」section。
+- 验证（隔离实例 11262，Edge 无头真实渲染）：
+  ```text
+  设置 → 超算互联网：账号 acfb3k2o6j / 135****1024 / 已登录 / Key 掩码 / 1 个免费模型
+  点「刷新模型」→ POST /plugins/dsh-scnet-connect/refresh 200，
+    「状态更新于」由 10:51:52 变为 10:51:55，控制台无报错
+  ```
+  截图：`.research/verify/settings-shot2.png`（不入库）。桩件级回归：
+  `node .research/verify/client-sim.mjs`（注册、渲染、错误态、刷新点击）。
