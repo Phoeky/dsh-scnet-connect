@@ -8,3 +8,6 @@ node_modules/
 
 # 内部逆向/验证记录，不随仓库分发
 docs/
+
+# 本地审查/验证用的临时 DSH_HOME 与 schema 快照
+.review/
