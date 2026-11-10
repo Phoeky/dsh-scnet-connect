@@ -238,6 +238,28 @@ dsh plugin --profile desktop add link:.
 - **思考等级**：目录里 `thinkingMode: "levels"` 或 `reasoning: true` 才算支持思考。当前 `SCNet-Max` 的目录条目是 `reasoning: false` + `thinkingMode: "levels"` —— 客户端 UI 也是按分等级展示的，所以插件判为支持；
 - **工具调用**：目录标 `toolCalling: false` 的模型仍会注册（DSH 是 agent，无法在描述符里表达「不下发工具」），但设置页会给它打「不支持工具」标，选中前请留意。
 
+### 图片输入
+
+1.2.1 起可以往对话里直接贴图/拖图。SCNet 网关本身支持视觉输入，实测：
+
+```text
+上传一张纯红色 8×8 PNG，问「这张图片主要是什么颜色？」
+→ HTTP 200，回答「红色」，prompt_tokens=226
+```
+
+如果插件没把 DSH 的附件服务接到 adapter 上，DSH 会在发出请求前就拦下来：
+
+```text
+pi-ai image input requires the durable attachment service
+```
+
+这条报错来自 DSH 核心，含义是「这个 provider 没声明自己能处理持久化图片附件」。
+插件通过 `resolveAttachments` / `resolveImageAccess` 两个钩子把 `ctx.get('attachments')`
+与 `ctx.get('fs')` 接进去，图片才会被投影成网关认识的 base64 图片块。
+
+> 在 headless/TUI profile 里如果没有挂载附件服务，这两个钩子会返回 `undefined`，
+> 发图片仍会得到上面那条明确报错 —— 这是预期行为，不是插件故障。
+
 ### 关于 `retryOnTransientErrors`
 
 SCNet 在推理实例切换/回收时会返回这种响应：
