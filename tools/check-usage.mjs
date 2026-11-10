@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// Token 用量记录的离线回归：累加、持久化、零用量忽略、pi-ai 事件透传。
+// Token 用量记录的离线回归：
+//   - harness `TokenUsage` 口径（inputTokens 是未命中部分，缓存命中单列）
+//   - 输入总量 = 未命中 + 命中 + 写入；缓存命中率 = 命中 / 输入总量
+//   - 旧版文件迁移、关闭记录、零用量忽略、多次 usage 只取最终值
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createUsageRecorder, withUsageRecording } from '../lib/scnet-usage.js';
+import { createUsageRecorder } from '../lib/scnet-usage.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scnet-usage-'));
 const file = path.join(dir, 'usage.json');
@@ -23,68 +26,65 @@ function check(label, fn) {
 }
 
 try {
-  console.log('1. 累加与持久化');
+  console.log('1. harness TokenUsage 口径');
   const recorder = createUsageRecorder({ file, flushDelayMs: 0 });
-  recorder.record({ model: 'SCNet-Max', usage: { input: 100, output: 20, totalTokens: 120, cacheRead: 30, cacheWrite: 5 } });
-  recorder.record({ model: 'SCNet-Max', usage: { inputTokens: 50, outputTokens: 10 } });
-  recorder.record({ model: 'SCNet-Max', usage: { input: 0, output: 0 } });
-  const snapshot = recorder.snapshot();
-  check('请求数 2', () => assert.equal(snapshot.requests, 2));
-  check('输入 150', () => assert.equal(snapshot.inputTokens, 150));
-  check('输出 30', () => assert.equal(snapshot.outputTokens, 30));
-  check('总 token 180', () => assert.equal(snapshot.totalTokens, 180));
-  check('缓存命中 30', () => assert.equal(snapshot.cacheReadTokens, 30));
-  check('缓存写入 5', () => assert.equal(snapshot.cacheWriteTokens, 5));
-  check('最近一次模型', () => assert.equal(snapshot.last.model, 'SCNet-Max'));
+  // 一次调用：prompt 1000，其中缓存命中 800；输出 50。
+  recorder.record({
+    model: 'SCNet-Max',
+    usage: { inputTokens: 200, outputTokens: 50, cacheReadTokens: 800, cacheWriteTokens: 0, totalTokens: 1050 },
+  });
+  let snap = recorder.snapshot();
+  check('输入总量含缓存 1000', () => assert.equal(snap.promptTokens, 1000));
+  check('未命中部分 200', () => assert.equal(snap.uncachedInputTokens, 200));
+  check('输出 50', () => assert.equal(snap.outputTokens, 50));
+  check('缓存命中率 0.8', () => assert.equal(snap.cacheHitRate, 0.8));
+  check('旧字段 inputTokens 也是输入总量', () => assert.equal(snap.inputTokens, 1000));
+  check('最近一次命中率 0.8', () => assert.equal(snap.last.cacheHitRate, 0.8));
 
+  recorder.record({ model: 'SCNet-Max', usage: { inputTokens: 100, outputTokens: 10 } });
+  snap = recorder.snapshot();
+  check('两次累计输入 1100', () => assert.equal(snap.promptTokens, 1100));
+  check('两次累计命中率 800/1100', () => assert.ok(Math.abs(snap.cacheHitRate - 800 / 1100) < 1e-9));
+
+  console.log('\n2. 零用量与关闭记录');
+  const before = snap.requests;
+  recorder.record({ model: 'SCNet-Max', usage: { inputTokens: 0, outputTokens: 0 } });
+  check('零用量不计数', () => assert.equal(recorder.snapshot().requests, before));
+
+  const disabled = createUsageRecorder({ file: path.join(dir, 'off.json'), enabled: false });
+  disabled.record({ model: 'x', usage: { inputTokens: 5, outputTokens: 5 } });
+  check('关闭后不累加', () => assert.equal(disabled.snapshot().requests, 0));
+
+  console.log('\n3. 落盘与重载');
   check('落盘成功', () => assert.equal(recorder.flush(), true));
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-  check('文件累计值', () => assert.equal(raw.inputTokens, 150));
-  check('文件无 prompt 字段', () => assert.equal('prompt' in raw, false));
-
-  console.log('\n2. 重新加载');
+  check('文件 version=2', () => assert.equal(raw.version, 2));
+  check('文件 promptTokens', () => assert.equal(raw.promptTokens, 1100));
   const reloaded = createUsageRecorder({ file });
-  const again = reloaded.snapshot();
-  check('请求数保留', () => assert.equal(again.requests, 2));
-  check('输出保留', () => assert.equal(again.outputTokens, 30));
+  check('重载后命中率一致', () => assert.ok(Math.abs(reloaded.snapshot().cacheHitRate - 800 / 1100) < 1e-9));
 
-  console.log('\n3. 关闭记录');
-  const disabledFile = path.join(dir, 'disabled.json');
-  const disabled = createUsageRecorder({ file: disabledFile, enabled: false });
-  disabled.record({ model: 'x', usage: { input: 1, output: 1 } });
-  check('不累加', () => assert.equal(disabled.snapshot().requests, 0));
-  disabled.flush();
-  check('不写文件', () => assert.equal(fs.existsSync(disabledFile), false));
-
-  console.log('\n4. withUsageRecording 透传事件并记录一次');
-  let recorded = null;
-  let seen = 0;
-  const api = {
-    marker: 'api',
-    async *stream() {
-      if (this.marker !== 'api') throw new Error('this lost');
-      yield { type: 'start' };
-      yield { type: 'text_delta', delta: 'hi' };
-      yield { type: 'done', message: { usage: { input: 3, output: 4, totalTokens: 7 } } };
-    },
-    async *streamSimple() {
-      yield { type: 'error', error: { usage: { input: 2, output: 0, totalTokens: 2 } } };
-    },
-  };
-  const wrapped = withUsageRecording(api, (info) => {
-    recorded = info;
-  });
-  for await (const event of wrapped.stream({ id: 'SCNet-Max' }, {}, {})) {
-    seen++;
-    assert.ok(event);
-  }
-  check('事件数量不变', () => assert.equal(seen, 3));
-  check('记录到模型', () => assert.equal(recorded.model, 'SCNet-Max'));
-  check('记录到输入', () => assert.equal(recorded.usage.input, 3));
-  for await (const _ of wrapped.streamSimple({ id: 'SCNet-Max' }, {}, {})) {
-    // drain
-  }
-  check('error usage 也被记录', () => assert.equal(recorded.usage.input, 2));
+  console.log('\n4. 旧版文件迁移（inputTokens 是未命中部分）');
+  const legacyFile = path.join(dir, 'legacy.json');
+  fs.writeFileSync(
+    legacyFile,
+    JSON.stringify({
+      version: 1,
+      since: '2026-11-10T00:00:00.000Z',
+      updatedAt: '2026-11-10T01:00:00.000Z',
+      requests: 10,
+      inputTokens: 23723,
+      outputTokens: 3614,
+      totalTokens: 1769161,
+      cacheReadTokens: 1741824,
+      cacheWriteTokens: 0,
+      last: { at: '2026-11-10T01:00:00.000Z', model: 'SCNet-Max', inputTokens: 854, outputTokens: 389, cacheReadTokens: 13824 },
+    }),
+  );
+  const migrated = createUsageRecorder({ file: legacyFile }).snapshot();
+  check('迁移后输入总量 1765547', () => assert.equal(migrated.promptTokens, 23723 + 1741824));
+  check('迁移后请求数保留', () => assert.equal(migrated.requests, 10));
+  check('迁移后命中率≈98.7%', () => assert.ok(Math.abs(migrated.cacheHitRate - 1741824 / (23723 + 1741824)) < 1e-9));
+  check('最近一次也迁移', () => assert.equal(migrated.last.promptTokens, 854 + 13824));
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }

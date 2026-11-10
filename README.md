@@ -10,8 +10,8 @@
 - **零配置**：装了客户端的话，自动读凭据、自动发现免费模型
 - **设置页管理**：账号、登录、模型开关都在 DSH 设置里
 - **1M 上下文**：`SCNet-Max` 按平台真实能力声明 `contextWindow: 1048576` / `maxTokens: 131072`（实测 104.5 万 token 输入通过、1.06M 被拒；同样的直连调用方式见 [`tools/repro/scnet-chat.mjs`](tools/repro/scnet-chat.mjs)）
-- **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）和**流中途被掐断**（`The response stream was interrupted`）都会被归一化成可重试错误，自动退避重试而不是整轮失败
-- **用量可见**：设置页显示累计输入/输出 token、缓存命中与最近一次请求（不走新路由，数据只在本机）
+- **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）、**流中途被掐断**（`The response stream was interrupted`）、以及偶发的 `400 + 10013` 都会被归一化成可重试错误，自动退避重试而不是整轮失败
+- **用量可见**：设置页按 M 显示累计输入/输出 token、缓存命中率与最近一次请求（不走新路由，数据只在本机）
 - **对话页账号徽标**：选中 SCNet 模型后，输入框左侧显示当前账号或「未登录」，点一下直接打开本插件设置页
 
 ![设置页](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings.png)
@@ -183,25 +183,25 @@ dsh plugin --profile desktop add link:.
 | 登录 / 退出 | 短信登录；退出后插件停止供 Key，可随时「恢复使用」 |
 | 只显示免费模型 | 默认开启。关闭后会把目录里所有模型都注册出来（可能产生费用） |
 | 刷新模型 | 重新读模型目录并用网关校验可用性 |
-| Token 用量 | 累计输入/输出、缓存命中、最近一次请求；数据只在本机 |
+| Token 用量 | 累计输入/输出（M）、缓存命中率、最近一次请求；数据只在本机 |
 | 对话页账号徽标 | 选中 SCNet 模型后显示在输入框左侧；点击打开本插件设置页 |
 
 ![模型开关](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings-models.png)
 
 ### Token 用量
 
-1.3.0 起，设置页会多一张 **Token 用量** 卡片：
+1.3.0 起，设置页会多一张 **Token 用量** 卡片；1.3.1 起输入/输出按 **M**（百万 token）显示，缓存改为 **命中率**：
 
 | 字段 | 含义 |
 | --- | --- |
-| 累计 | 本机、本 profile 累计的输入 / 输出 token |
-| 缓存 | 缓存命中的输入 token（上游有上报时）；有写入时同时显示写入量 |
-| 最近一次 | 最近一次请求的模型、输入 / 输出与时间 |
+| 累计 | 本机、本 profile 累计的输入 / 输出 token，单位 **M**（百万） |
+| 缓存命中率 | 缓存命中 token / 输入总量；输入总量 = 未命中 + 命中 + 写入 |
+| 最近一次 | 最近一次请求的模型、输入 / 输出（M）、命中率与时间 |
 | 请求数 | 真正带 token 计数的请求次数（连接没建立就失败的不算） |
 
-数据来自 pi-ai 的 terminal usage，写在 `$DSH_HOME/scnet-connect-usage[.<profile>].json`，只包含计数和模型 id，不含 prompt、Key 或 Cookie。它不新增 HTTP 路由，直接复用 `/status` 响应传给设置页；`recordUsage: false` 可关闭。删掉该文件即可清零。
+数据来自 harness 的 `TokenUsage`（`llm/stream` 的 usage chunk），写在 `$DSH_HOME/scnet-connect-usage[.<profile>].json`，只包含计数和模型 id，不含 prompt、Key 或 Cookie。它不新增 HTTP 路由，直接复用 `/status` 响应传给设置页；`recordUsage: false` 可关闭。删掉该文件即可清零。
 
-> SCNet 当前不返回 `cacheRead` / `cacheWrite` 字段，所以缓存命中通常显示 0；这不是插件没统计，而是上游没有提供。将来网关补上字段会自动开始记录。
+> 输入总量包含缓存命中的部分，不会把命中数重复加一遍。SCNet-Max 实测会上报 `prompt_tokens_details.cached_tokens`，所以缓存命中率是真实比例；上游没上报时显示 0%。旧版用量文件会在加载时自动迁移（旧 `inputTokens` 按未命中部分处理）。
 
 ### 对话页账号徽标
 
@@ -249,7 +249,7 @@ dsh plugin --profile desktop add link:.
 | `inputImages` | `true` | 是否声明接受图片 |
 | `reasoning` | `true` | 是否声明支持思考等级 |
 | `verifyWithGateway` | `true` | 刷新时用 `GET /models` 校验 |
-| `retryOnTransientErrors` | `true` | 把 SCNet 的瞬时抖动改写成可重试错误：`5xx` 却标 `invalid_request_error`、以及流中途被掐断（见下） |
+| `retryOnTransientErrors` | `true` | 把 SCNet 的瞬时抖动改写成可重试错误：`5xx` 却标 `invalid_request_error`、`400 + 10013`（仅同一请求体第一次）、以及流中途被掐断（见下） |
 | `recordUsage` | `true` | 记录 token 用量（输入/输出/缓存命中）；关闭后设置页不再统计 |
 
 </details>
@@ -307,7 +307,7 @@ HTTP 503
 
 插件默认把这层归一化打开：只针对「状态码 ≥ 500 且 `type` 是 `invalid_request_error`」的响应，把 `type` 改写为 `api_error`（状态码与 message 原样保留），让归类落到 `SERVER`，交给 DSH 的 5 次指数退避重试。
 
-刻意不碰的：真正的 `400`（如参数错误 `10013`）、`401/403/402/429`、以及普通 2xx 响应。
+刻意不碰的：真正的 `400` 其它错误码（如 `10006`）、`401/403/402/429`、以及普通 2xx 响应。
 
 实测（本地假网关，前 2 次返回上述 503）：
 
@@ -315,6 +315,16 @@ HTTP 503
 | --- | --- | --- |
 | `retryOnTransientErrors: false` | 2（无重试） | 失败，`code: INVALID_REQUEST` |
 | `retryOnTransientErrors: true`（默认） | 4（2 次 503 后成功） | 正常完成 |
+
+### 关于 `400 + 10013`（1.3.0 起一次性自愈）
+
+`10013` 在平台上是「参数非法」，但也实测到它被拿来包装瞬时抖动：一次真实 agent 请求（prompt ≈494k、`reasoning_effort=max`、36 个工具）在 1ms 内被回 `400 ... code:"10013"`，而前后每一步同样参数都成功；逐项探测（`max_tokens=131072`、`max`/`xhigh`/`none`、直到 ~500k prompt、10 次相同大请求）全部 200，无法复现。
+
+所以插件只做**一次性**自愈：
+
+- 同一请求体第一次遇到 `400 + 10013` → 状态码改写为 `500`、`type` 改为 `api_error`、message 换成不含 “invalid request” 的文案（保留 `request_id`），让 DSH 归类成 `SERVER` 并重试一次；
+- 同一请求体第二次仍报 10013 → 原样透传，按真正的参数错误立刻失败，不会拖成 5 次无用重试；
+- 只改 body 的 `type` 不够：DSH 的归类器先命中 `/\b400\b|invalid.?request/i`，pi-ai 格式化出的文本是 `400: {json}` 且原文含 “Invalid request parameters”，所以状态码和文案必须一起改。
 
 ### 流中途被中断（1.2.2 起）
 
@@ -356,6 +366,7 @@ data: {"error":{"message":"The response stream was interrupted. (request_id: bec
 | 短信收不到 | 确认手机号正确、图形验证码没填错；平台有 60 秒与每小时次数限制 |
 | 上游 429 | 插件不屏蔽限流，降低并发或稍等重试 |
 | 报 `503` + `code: 10008` / `10009` | 平台侧路由抖动。默认会自动重试；若已被手动关掉 `retryOnTransientErrors`，打开它或稍后重发 |
+| 报 `400` + `code: 10013`（`Invalid request parameters`） | 参数错误码，但平台偶尔会拿它包装瞬时抖动。默认做法是**同一请求体第一次遇到时按可重试处理、自动重试一次**；第二次仍报就原样失败（说明确实是参数问题），带上 `request_id` 反馈 |
 | 报 `The response stream was interrupted. (request_id: …)` | 上游在流中途掐断了响应。1.2.2 起会自动重试；若在 1.2.1 及更早版本遇到，升级即可。反复出现且重试也没用，就带上 `request_id` 反馈 |
 
 ---
