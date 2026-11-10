@@ -1,6 +1,6 @@
 {
   "name": "dsh-scnet-connect",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "把 SCNet 模型接入 DeepSeek Harness，可免客户端登录，使用免费模型（SCNet-Max，基座基本可确定为 DeepSeek Flash）",
   "type": "module",
   "main": "./lib/index.js",
@@ -49,7 +49,11 @@
   },
   "scripts": {
     "check": "node tools/check.mjs",
-    "check:fetch": "node tools/check-fetch.mjs && node tools/check-classify.mjs && node tools/check-interrupt.mjs"
+    "check:fetch": "node tools/check-fetch.mjs && node tools/check-classify.mjs && node tools/check-interrupt.mjs",
+    "check:http": "node tools/check-http.mjs",
+    "check:login": "node tools/check-login.mjs",
+    "check:usage": "node tools/check-usage.mjs",
+    "check:offline": "npm run check:fetch && npm run check:http && npm run check:login && npm run check:usage"
   },
   "repository": {
     "type": "git",

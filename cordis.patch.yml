@@ -26,5 +26,6 @@
         # reasoning: true
         # verifyWithGateway: true    # 刷新模型时用 GET /models 校验可用性
         # retryOnTransientErrors: true  # 把 5xx 却自称 invalid_request 的抖动改写成可重试错误
+        # recordUsage: true       # 记录 token 用量（输入/输出/缓存命中），显示在设置页
         # freeOnly: true           # 只注册免费模型（默认开；设置页切换会覆盖它）
         # credentialSource: auto   # auto | client | login

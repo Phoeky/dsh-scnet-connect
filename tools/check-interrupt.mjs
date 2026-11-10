@@ -246,6 +246,61 @@ console.log('\n7. 提前取消读取');
   check('无 unhandledRejection', unhandled, null);
 }
 
+// --------------------------- 8. CRLF 流（U2 回归）
+console.log('\n8. CRLF 分隔的 SSE');
+{
+  const crlf = (o) => `data: ${JSON.stringify(o)}\r\n\r\n`;
+  const frames = [
+    crlf({ choices: [{ delta: { content: '第一段' } }] }),
+    crlf({ choices: [{ delta: { content: '第二段' } }] }),
+    crlf({ choices: [{ delta: {}, finish_reason: 'stop' }] }),
+  ];
+
+  // 8a. 正常 CRLF 流逐字节一致（任意切块）。
+  for (const size of [1, 7, 64]) {
+    const wrapped = createRetryFriendlyFetch({
+      fetchImpl: async () => chunkedResponse(frames.join(''), size),
+    });
+    const out = await drainBytes(await wrapped('https://example.invalid/x', {}));
+    check(`CRLF 切块 ${size} 字节逐字节一致`, out === frames.join(''), true);
+  }
+
+  // 8b. CRLF 流中途的 error 帧也要被改写。
+  const error = crlf({ error: { message: REAL, type: 'server_error', code: null } });
+  const wrapped = createRetryFriendlyFetch({
+    fetchImpl: async () => chunkedResponse(frames[0] + error, 5),
+  });
+  const out = await drainBytes(await wrapped('https://example.invalid/x', {}));
+  check('CRLF error 帧已改写', out.includes('SCNet stream ended before completion'), true);
+  check('CRLF request_id 仍保留', out.includes('bec198bdb37b73f0-20261110111508406'), true);
+
+  // 8c. 第一帧必须在流结束前就能读到（证明没有整段缓冲）。
+  let closed = false;
+  const slow = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(frames[0]));
+        setTimeout(() => {
+          try {
+            controller.enqueue(new TextEncoder().encode(frames.slice(1).join('')));
+            controller.close();
+            closed = true;
+          } catch {
+            // 读取端可能已经取消；这不是被测行为。
+          }
+        }, 50);
+      },
+    }),
+    { status: 200, headers: { 'content-type': 'text/event-stream' } },
+  );
+  const streamWrapped = createRetryFriendlyFetch({ fetchImpl: async () => slow });
+  const reader = (await streamWrapped('https://example.invalid/x', {})).body.getReader();
+  const first = await reader.read();
+  check('CRLF 首帧未被整段缓冲', closed, false);
+  check('CRLF 首帧内容可读', new TextDecoder().decode(first.value).includes('第一段'), true);
+  await reader.cancel('test-done');
+}
+
 console.log(
   failures === 0
     ? '\n结论：全部通过——流中途中断已从「不可重试」变成「可重试」，且未误伤真实错误'

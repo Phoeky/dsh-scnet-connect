@@ -11,6 +11,8 @@
 - **设置页管理**：账号、登录、模型开关都在 DSH 设置里
 - **1M 上下文**：`SCNet-Max` 按平台真实能力声明 `contextWindow: 1048576` / `maxTokens: 131072`（实测 104.5 万 token 输入通过、1.06M 被拒；同样的直连调用方式见 [`tools/repro/scnet-chat.mjs`](tools/repro/scnet-chat.mjs)）
 - **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）和**流中途被掐断**（`The response stream was interrupted`）都会被归一化成可重试错误，自动退避重试而不是整轮失败
+- **用量可见**：设置页显示累计输入/输出 token、缓存命中与最近一次请求（不走新路由，数据只在本机）
+- **对话页账号徽标**：选中 SCNet 模型后，输入框左侧显示当前账号或「未登录」，点一下直接打开本插件设置页
 
 ![设置页](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings.png)
 
@@ -181,8 +183,37 @@ dsh plugin --profile desktop add link:.
 | 登录 / 退出 | 短信登录；退出后插件停止供 Key，可随时「恢复使用」 |
 | 只显示免费模型 | 默认开启。关闭后会把目录里所有模型都注册出来（可能产生费用） |
 | 刷新模型 | 重新读模型目录并用网关校验可用性 |
+| Token 用量 | 累计输入/输出、缓存命中、最近一次请求；数据只在本机 |
+| 对话页账号徽标 | 选中 SCNet 模型后显示在输入框左侧；点击打开本插件设置页 |
 
 ![模型开关](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings-models.png)
+
+### Token 用量
+
+1.3.0 起，设置页会多一张 **Token 用量** 卡片：
+
+| 字段 | 含义 |
+| --- | --- |
+| 累计 | 本机、本 profile 累计的输入 / 输出 token |
+| 缓存 | 缓存命中的输入 token（上游有上报时）；有写入时同时显示写入量 |
+| 最近一次 | 最近一次请求的模型、输入 / 输出与时间 |
+| 请求数 | 真正带 token 计数的请求次数（连接没建立就失败的不算） |
+
+数据来自 pi-ai 的 terminal usage，写在 `$DSH_HOME/scnet-connect-usage[.<profile>].json`，只包含计数和模型 id，不含 prompt、Key 或 Cookie。它不新增 HTTP 路由，直接复用 `/status` 响应传给设置页；`recordUsage: false` 可关闭。删掉该文件即可清零。
+
+> SCNet 当前不返回 `cacheRead` / `cacheWrite` 字段，所以缓存命中通常显示 0；这不是插件没统计，而是上游没有提供。将来网关补上字段会自动开始记录。
+
+### 对话页账号徽标
+
+选中 `SCNet Connect → SCNet-Max` 后，输入框工具栏里、模型选择器左侧会出现一枚小徽标：
+
+| 状态 | 显示 |
+| --- | --- |
+| 已登录 | `SCNet · 用户名`（没有用户名时显示「已登录」），左侧绿点 |
+| 未登录 / 已停用 | `SCNet · 未登录` / `SCNet · 已停用`，左侧红点 |
+| 状态读取失败 | `SCNet · 状态未知`，悬停给出原因 |
+
+点徽标会直接打开「设置 → SCNet Connect」，不需要再走侧边栏设置；账号信息每 30 秒或窗口重新获得焦点时刷新一次。它只在当前会话选中的是 `scnet` 模型时出现，不会干扰其他 provider。
 
 ---
 
@@ -199,6 +230,7 @@ dsh plugin --profile desktop add link:.
     modelIds: ''             # 逗号分隔；留空 = 自动发现
     contextWindow: 0         # 0 = 跟随目录/默认
     maxTokens: 0             # 0 = 跟随目录/默认
+    recordUsage: true        # 记录 token 用量并显示在设置页
 ```
 
 <details>
@@ -218,6 +250,7 @@ dsh plugin --profile desktop add link:.
 | `reasoning` | `true` | 是否声明支持思考等级 |
 | `verifyWithGateway` | `true` | 刷新时用 `GET /models` 校验 |
 | `retryOnTransientErrors` | `true` | 把 SCNet 的瞬时抖动改写成可重试错误：`5xx` 却标 `invalid_request_error`、以及流中途被掐断（见下） |
+| `recordUsage` | `true` | 记录 token 用量（输入/输出/缓存命中）；关闭后设置页不再统计 |
 
 </details>
 
@@ -228,6 +261,7 @@ dsh plugin --profile desktop add link:.
 | 「只显示免费模型」 | `$DSH_HOME/scnet-connect-preferences.json` | 设置页切换后会记住；**优先级高于配置文件里的 `freeOnly`**。想回到配置文件的值，删掉这个文件 |
 | 「退出登录 / 恢复使用」 | `$DSH_HOME/scnet-connect-suspended.json` | 退出后连客户端凭据一并停用，重启 DSH 仍生效 |
 | 免客户端登录会话 | `$DSH_HOME/scnet-session.json` | 含 Cookie 与 `sk-` key（创建时按 `0600`），退出即删 |
+| Token 用量 | `$DSH_HOME/scnet-connect-usage[.<profile>].json` | 输入/输出/缓存命中累计与最近一次请求；不含 prompt/Key |
 | 诊断快照 | `$DSH_HOME/scnet-connect-status[.<profile>].json` | 只读排障用，`registered` / 模型 / 掩码 key；文件名带 profile，多个 profile 不会互相覆盖 |
 
 ### 关于模型元数据
@@ -352,6 +386,7 @@ dsh plugin --profile desktop remove dsh-scnet-connect
 Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-status*.json" -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-suspended.json" -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-preferences.json" -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.dsh\scnet-connect-usage*.json" -ErrorAction SilentlyContinue
 Remove-Item "$env:USERPROFILE\.dsh\scnet-session.json" -ErrorAction SilentlyContinue
 ```
 
@@ -362,6 +397,7 @@ Remove-Item "$env:USERPROFILE\.dsh\scnet-session.json" -ErrorAction SilentlyCont
 ## 已知限制
 
 - 免费模型取决于平台：目前只有 `SCNet-Max` 标记为 `free`。
+- Token 用量的缓存命中/写入字段取决于上游；SCNet 当前不返回时显示 0。
 - 「免费」是平台侧的**限时**政策，不是永久免费；本插件不提供额度，也不绕过计费。
 - 插件内**不提供微信扫码**（平台二维码接口对非微信客户端恒返回 402）。
 - 用的是未公开的客户端内部接口，SCNet 客户端升级后可能变化。
@@ -377,20 +413,26 @@ git clone https://github.com/Phoeky/dsh-scnet-connect.git && cd dsh-scnet-connec
 node tools/check.mjs            # 自检：凭据、模型目录、账号
 node tools/check.mjs --live     # 额外请求一次 /models
 npm run check:fetch             # 错误归一化 + 归类 + 流中断改写（离线，无需凭据）
+npm run check:offline           # 上面三项 + HTTP 413/登录/token 用量（离线，无需凭据）
 ```
 
 ```text
 lib/index.js            插件入口：注册 provider、设置页路由
-lib/client.js           浏览器侧：设置页卡片
+lib/client.js           浏览器侧：设置页卡片 + 输入框账号徽标
 lib/scnet-fetch.js      上游抖动归一化（5xx 伪 invalid_request、流中途中断）
 lib/scnet-login.js      免客户端登录状态机
 lib/scnet-platform.js   平台接口封装
 lib/scnet-web-login.js  短信登录与验证码
 lib/scnet-catalog.js    模型目录发现与过滤
 lib/scnet-credential.js 客户端凭据读取
+lib/scnet-http.js       设置页 JSON 响应/请求体读取（413 边界）
 lib/scnet-models.js     模型描述符
+lib/scnet-usage.js      token 用量记录与 pi-ai 事件包装
 tools/fake-gateway.mjs  本地假网关（前 N 次 chat 返回 503/10008，用于复现重试）
-tools/check-interrupt.mjs 流中途中断的改写与边界（含字节级一致性）
+tools/check-interrupt.mjs 流中途中断的改写与边界（含字节级一致性、CRLF）
+tools/check-http.mjs    请求体超限必须收到 413 / HEAD 语义
+tools/check-login.mjs   登录网络异常、注册 via、pending 复位
+tools/check-usage.mjs   token 用量累加/持久化/事件透传
 ```
 
 ## License
