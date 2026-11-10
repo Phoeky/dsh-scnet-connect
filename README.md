@@ -10,7 +10,7 @@
 - **零配置**：装了客户端的话，自动读凭据、自动发现免费模型
 - **设置页管理**：账号、登录、模型开关都在 DSH 设置里
 - **1M 上下文**：`SCNet-Max` 按平台真实能力声明 `contextWindow: 1048576` / `maxTokens: 131072`（实测 104.5 万 token 输入通过、1.06M 被拒；同样的直连调用方式见 [`tools/repro/scnet-chat.mjs`](tools/repro/scnet-chat.mjs)）
-- **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）会被归一化成可重试错误，自动退避重试而不是整轮失败
+- **抖动自愈**：平台偶发的 `503 + 10008`（路由切换）和**流中途被掐断**（`The response stream was interrupted`）都会被归一化成可重试错误，自动退避重试而不是整轮失败
 
 ![设置页](https://raw.githubusercontent.com/Phoeky/dsh-scnet-connect/master/.github/assets/settings.png)
 
@@ -217,7 +217,7 @@ dsh plugin --profile desktop add link:.
 | `inputImages` | `true` | 是否声明接受图片 |
 | `reasoning` | `true` | 是否声明支持思考等级 |
 | `verifyWithGateway` | `true` | 刷新时用 `GET /models` 校验 |
-| `retryOnTransientErrors` | `true` | 把 SCNet「5xx 却标成 `invalid_request_error`」的瞬时抖动改写成可重试的服务端错误（见下） |
+| `retryOnTransientErrors` | `true` | 把 SCNet 的瞬时抖动改写成可重试错误：`5xx` 却标 `invalid_request_error`、以及流中途被掐断（见下） |
 
 </details>
 
@@ -273,7 +273,7 @@ HTTP 503
 
 插件默认把这层归一化打开：只针对「状态码 ≥ 500 且 `type` 是 `invalid_request_error`」的响应，把 `type` 改写为 `api_error`（状态码与 message 原样保留），让归类落到 `SERVER`，交给 DSH 的 5 次指数退避重试。
 
-刻意不碰的：真正的 `400`（如参数错误 `10013`）、`401/403/402/429`、以及 2xx 流式响应。
+刻意不碰的：真正的 `400`（如参数错误 `10013`）、`401/403/402/429`、以及普通 2xx 响应。
 
 实测（本地假网关，前 2 次返回上述 503）：
 
@@ -281,6 +281,32 @@ HTTP 503
 | --- | --- | --- |
 | `retryOnTransientErrors: false` | 2（无重试） | 失败，`code: INVALID_REQUEST` |
 | `retryOnTransientErrors: true`（默认） | 4（2 次 503 后成功） | 正常完成 |
+
+### 流中途被中断（1.2.2 起）
+
+同一层归一化还覆盖另一种抖动：**响应流已经开始了，上游在中间插一个 `error` 帧把流掐掉**。
+
+```
+data: {"error":{"message":"The response stream was interrupted. (request_id: bec198bdb37b73f0-20261110111508406)"}}
+```
+
+这类失败原本完全不可重试，原因有一条链路：
+
+1. OpenAI SDK 读到该帧后抛 `APIError(undefined, data.error)`；
+2. pi-ai 的 catch 把 `formatProviderError(normalizeProviderError(error))` 写进 `errorMessage`，就是上面那句原文；
+3. DSH 的 `classifyPiAiError` 对这句原文**一条正则都不命中**——没有状态码、没有 `timeout`、没有 `connection`/`socket`——于是落到兜底 `PI_AI_ERROR`，而它**不在默认可重试集合**里，一次退避都不做。
+
+对照一下就明白有多冤：如果上游干脆直接掐断连接（不发 error 帧），pi-ai 抛的是 `Stream ended without finish_reason`，这句命中 `/stream ended (?:before|without)\b/i` → `TRANSPORT` → **会重试**。也就是说，上游多送了一句「友好」的说明，反而把可自愈的抖动升级成了整轮失败。
+
+现在插件在 SSE 层把它归回 `TRANSPORT`：给 `error` 帧的 message 前面追加一句 `SCNet stream ended before completion …`，**原文（含 `request_id`）原样保留在末尾**，UI 上照样能复制去提工单。
+
+改写有严格边界，避免把真错误拖成 5 次无用重试——只同时满足以下三条才动手：
+
+- 这是 `data:` 帧里的 `error` 对象；
+- 这条流**已经吐过内容**（`content` / `reasoning_content` / `tool_calls` 任一出现）；
+- 还没见到终止帧（`[DONE]` 或非空 `finish_reason`）。
+
+所以配额、鉴权这类「一上来就报错」的情况仍然原样透传。正常流零影响：把一份真实 SCNet SSE 字节按 1/3/7/64/4096 字节任意切块后过一遍包装，输出与原始字节**逐字节一致**（`tools/check-interrupt.mjs`）。
 
 ---
 
@@ -296,6 +322,7 @@ HTTP 503
 | 短信收不到 | 确认手机号正确、图形验证码没填错；平台有 60 秒与每小时次数限制 |
 | 上游 429 | 插件不屏蔽限流，降低并发或稍等重试 |
 | 报 `503` + `code: 10008` / `10009` | 平台侧路由抖动。默认会自动重试；若已被手动关掉 `retryOnTransientErrors`，打开它或稍后重发 |
+| 报 `The response stream was interrupted. (request_id: …)` | 上游在流中途掐断了响应。1.2.2 起会自动重试；若在 1.2.1 及更早版本遇到，升级即可。反复出现且重试也没用，就带上 `request_id` 反馈 |
 
 ---
 
@@ -349,13 +376,13 @@ Remove-Item "$env:USERPROFILE\.dsh\scnet-session.json" -ErrorAction SilentlyCont
 git clone https://github.com/Phoeky/dsh-scnet-connect.git && cd dsh-scnet-connect
 node tools/check.mjs            # 自检：凭据、模型目录、账号
 node tools/check.mjs --live     # 额外请求一次 /models
-npm run check:fetch             # 错误归一化 + 归类（离线，无需凭据）
+npm run check:fetch             # 错误归一化 + 归类 + 流中断改写（离线，无需凭据）
 ```
 
 ```text
 lib/index.js            插件入口：注册 provider、设置页路由
 lib/client.js           浏览器侧：设置页卡片
-lib/scnet-fetch.js      上游 5xx 抖动的错误归一化（可重试）
+lib/scnet-fetch.js      上游抖动归一化（5xx 伪 invalid_request、流中途中断）
 lib/scnet-login.js      免客户端登录状态机
 lib/scnet-platform.js   平台接口封装
 lib/scnet-web-login.js  短信登录与验证码
@@ -363,6 +390,7 @@ lib/scnet-catalog.js    模型目录发现与过滤
 lib/scnet-credential.js 客户端凭据读取
 lib/scnet-models.js     模型描述符
 tools/fake-gateway.mjs  本地假网关（前 N 次 chat 返回 503/10008，用于复现重试）
+tools/check-interrupt.mjs 流中途中断的改写与边界（含字节级一致性）
 ```
 
 ## License
