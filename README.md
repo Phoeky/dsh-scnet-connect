@@ -203,6 +203,31 @@ dsh plugin --profile desktop add link:.
 
 > 输入总量包含缓存命中的部分，不会把命中数重复加一遍。SCNet-Max 实测会上报 `prompt_tokens_details.cached_tokens`，所以缓存命中率是真实比例；上游没上报时显示 0%。旧版用量文件会在加载时自动迁移（旧 `inputTokens` 按未命中部分处理）。
 
+#### 持久化（1.3.1 修复「重启后归零」）
+
+**1.3.0 有这个 bug：重启 DSH 后累计用量归零。** 原因不是没写盘，而是**文件名判断错了**：
+
+1.3.0 用 `process.env.DSH_PROFILE` 决定文件名后缀。但那个变量是 `dsh-shell-env` 在**每次 shell 调用**（bash/pwsh）时注入的，**插件自己的进程里根本没有它**，于是恒为空串、文件名永远不带后缀。一旦某次运行恰好带了环境变量、另一次没带，两个实例就各写各的文件，看起来就是「数据没了」。
+
+1.3.1 改为读 DSH 自己提供的服务：
+
+```js
+ctx.get('profileContext')?.name   // 启动时传入的 --profile 名
+```
+
+拿不到（headless、无 profile 启动）时才退回环境变量。升级后**不会丢数据**：首次启动会把 1.3.0 留下的无后缀 `scnet-connect-usage.json` 自动改名迁移到 `scnet-connect-usage.desktop.json`。迁移规则：
+
+| 情况 | 行为 |
+| --- | --- |
+| 带后缀的新文件已存在 | 以新文件为准，旧文件原地不动 |
+| 旧文件记录了别的 profile（如 `tui`） | 不迁移，避免串号 |
+| 旧文件损坏（不是 JSON） | 照样迁移，原始内容保留以便人工抢救 |
+| 迁移失败 | 继续用旧文件，宁可少迁移也不丢数据 |
+
+写入时机也补强了：记录仍在 1.5 秒防抖后原子写盘（`写临时文件 → rename`），并额外挂了一个同步的 `exit` 钩子——即使进程在防抖窗口内退出，未落盘的改动也会在退出前写完。正常卸载时 `dispose` 同样会强制落盘。
+
+另外，**流中途报错或被中断**的调用现在也会计数（以前只在流正常结束时记，这些 token 被漏掉了）。
+
 ### 对话页账号徽标
 
 选中 `SCNet Connect → SCNet-Max` 后，输入框工具栏里、模型选择器左侧会出现一枚小徽标：
@@ -261,7 +286,7 @@ dsh plugin --profile desktop add link:.
 | 「只显示免费模型」 | `$DSH_HOME/scnet-connect-preferences.json` | 设置页切换后会记住；**优先级高于配置文件里的 `freeOnly`**。想回到配置文件的值，删掉这个文件 |
 | 「退出登录 / 恢复使用」 | `$DSH_HOME/scnet-connect-suspended.json` | 退出后连客户端凭据一并停用，重启 DSH 仍生效 |
 | 免客户端登录会话 | `$DSH_HOME/scnet-session.json` | 含 Cookie 与 `sk-` key（创建时按 `0600`），退出即删 |
-| Token 用量 | `$DSH_HOME/scnet-connect-usage[.<profile>].json` | 输入/输出/缓存命中累计与最近一次请求；不含 prompt/Key |
+| Token 用量 | `$DSH_HOME/scnet-connect-usage[.<profile>].json` | 输入/输出/缓存命中累计与最近一次请求；不含 prompt/Key。1.3.0 写的无后缀文件会在升级后首次启动时自动迁移 |
 | 诊断快照 | `$DSH_HOME/scnet-connect-status[.<profile>].json` | 只读排障用，`registered` / 模型 / 掩码 key；文件名带 profile，多个 profile 不会互相覆盖 |
 
 ### 关于模型元数据
@@ -368,6 +393,7 @@ data: {"error":{"message":"The response stream was interrupted. (request_id: bec
 | 报 `503` + `code: 10008` / `10009` | 平台侧路由抖动。默认会自动重试；若已被手动关掉 `retryOnTransientErrors`，打开它或稍后重发 |
 | 报 `400` + `code: 10013`（`Invalid request parameters`） | 参数错误码，但平台偶尔会拿它包装瞬时抖动。默认做法是**同一请求体第一次遇到时按可重试处理、自动重试一次**；第二次仍报就原样失败（说明确实是参数问题），带上 `request_id` 反馈 |
 | 报 `The response stream was interrupted. (request_id: …)` | 上游在流中途掐断了响应。1.2.2 起会自动重试；若在 1.2.1 及更早版本遇到，升级即可。反复出现且重试也没用，就带上 `request_id` 反馈 |
+| Token 用量重启后归零 | 1.3.0 的 bug（profile 名读错导致文件名漂移），1.3.1 已修。升级后首次启动会自动迁移旧的无后缀文件，累计数据不会丢 |
 
 ---
 
@@ -439,11 +465,12 @@ lib/scnet-credential.js 客户端凭据读取
 lib/scnet-http.js       设置页 JSON 响应/请求体读取（413 边界）
 lib/scnet-models.js     模型描述符
 lib/scnet-usage.js      token 用量记录与 pi-ai 事件包装
+lib/scnet-usage-path.js 用量/诊断文件路径、profile 名解析与旧文件迁移
 tools/fake-gateway.mjs  本地假网关（前 N 次 chat 返回 503/10008，用于复现重试）
 tools/check-interrupt.mjs 流中途中断的改写与边界（含字节级一致性、CRLF）
 tools/check-http.mjs    请求体超限必须收到 413 / HEAD 语义
 tools/check-login.mjs   登录网络异常、注册 via、pending 复位
-tools/check-usage.mjs   token 用量累加/持久化/事件透传
+tools/check-usage.mjs   用量累加/持久化/中断计数/文件迁移（45 项断言）
 ```
 
 ## License
