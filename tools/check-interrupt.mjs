@@ -301,6 +301,25 @@ console.log('\n8. CRLF 分隔的 SSE');
   await reader.cancel('test-done');
 }
 
+// 空终止原因不是终止帧，空工具数组也不代表已有内容。
+console.log('\n9. SSE 状态与 CRLF 改写回归');
+for (const [label, frames, expected] of [
+  ['空 finish_reason 后仍应改写', [sse({ choices: [{ delta: { content: '已有内容' }, finish_reason: '' }] }), errorFrame], true],
+  ['空工具数组不算内容', [sse({ choices: [{ delta: { tool_calls: [] } }] }), errorFrame], false],
+]) {
+  const wrapped = createRetryFriendlyFetch({ fetchImpl: async () => sseResponse(frames) });
+  const out = await (await wrapped('https://example.invalid/x', {})).text();
+  check(label, out.includes('SCNet stream ended before completion'), expected);
+}
+{
+  const frame = 'event: error\r\ndata: ' + JSON.stringify({ error: { message: REAL } }) + '\r\nid: local\r\n\r\n';
+  const wrapped = createRetryFriendlyFetch({ fetchImpl: async () => chunkedResponse(contentFrames[0] + frame, 1) });
+  const out = await (await wrapped('https://example.invalid/x', {})).text();
+  const tail = out.slice(contentFrames[0].length);
+  check('改写仍保持所有 CRLF 行尾', /(^|[^\r])\n/.test(tail), false);
+  check('保留事件名和事件标识', tail.includes('event: error\r\n') && tail.includes('id: local\r\n'), true);
+}
+
 console.log(
   failures === 0
     ? '\n结论：全部通过——流中途中断已从「不可重试」变成「可重试」，且未误伤真实错误'

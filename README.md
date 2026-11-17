@@ -377,6 +377,49 @@ data: {"error":{"message":"The response stream was interrupted. (request_id: bec
 
 所以配额、鉴权这类「一上来就报错」的情况仍然原样透传。正常流零影响：把一份真实 SCNet SSE 字节按 1/3/7/64/4096 字节任意切块后过一遍包装，输出与原始字节**逐字节一致**（`tools/check-interrupt.mjs`）。
 
+### 关于 `Cannot read properties of undefined (reading 'length')`（1.3.2 起）
+
+现象很吓人：发一条消息（哪怕只是 `test`）立刻失败，`usage` 全 0、连 `start` 事件都没有，错误码是兜底的 `PI_AI_ERROR`。
+
+根因在 **pi-ai 的 `sections` 处理缺陷**，与 SCNet 网关无关：
+
+```js
+// pi-ai/dist/utils/text.js:11-17
+export function getSystemMessageText(message) {
+  const parts = [contentText(message.content)];
+  for (const text of Object.values(message.sections ?? {})) {
+    if (text !== null) parts.push(text);          // ← undefined 也被 push 进来
+  }
+  return parts.filter((part) => part.length > 0).join("\n\n");   // ← 在这里崩
+}
+```
+
+它只把 `null` 当成「这个 section 已删除」，`undefined` 会被原样塞进 `parts`，随后 `part.length` 就抛 `Cannot read properties of undefined (reading 'length')`。
+
+**这条路径绕不开**，因为 `openai-completions` 对**第一条 system 消息**必调它：
+
+```
+openai-completions.js:926  convertMessages → getSystemMessageText(msg)   ← 发请求前
+estimate.js:32             clampMaxTokensToContext → estimateContextTokens → getSystemMessageText
+```
+
+后者意味着把 `contextWindow` 设成 `0` 也躲不掉（已实测：仍会在 `convertMessages` 抛）。而且它**与工具数量、历史长度都无关**——单条带 `sections: { k: undefined }` 的 system 消息即可 100% 复现。
+
+1.3.2 在调用 pi-ai 之前做一层净化（`sanitizePiContext`，见 `lib/scnet-fetch.js`）：把 system 消息 `sections` 里**非字符串**的值统一丢弃——语义上等价于「这个 section 没有内容」，与 pi-ai 自己对 `null` 的处理一致。要点：
+
+- 纯函数，不改原对象；
+- 没有需要清洗的内容时返回**同一引用**（零开销）；
+- `sections` 全被清空时整个字段移除，等价于「没有 section」；
+- 只处理 `role === 'system'`，其它角色原样透传。
+
+实测（用从 `app.asar` 解包出来的真实 pi-ai）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 裸 pi-ai + 毒饵 context | 抛 `Cannot read properties of undefined (reading 'length')` |
+| 经插件包装 + 毒饵 context | 正常 `start,done` |
+| 经插件包装 + 正常 context | 请求体与裸 pi-ai **逐字节一致** |
+
 ---
 
 ## 故障排查
@@ -394,6 +437,7 @@ data: {"error":{"message":"The response stream was interrupted. (request_id: bec
 | 报 `400` + `code: 10013`（`Invalid request parameters`） | 参数错误码，但平台偶尔会拿它包装瞬时抖动。默认做法是**同一请求体第一次遇到时按可重试处理、自动重试一次**；第二次仍报就原样失败（说明确实是参数问题），带上 `request_id` 反馈 |
 | 报 `The response stream was interrupted. (request_id: …)` | 上游在流中途掐断了响应。1.2.2 起会自动重试；若在 1.2.1 及更早版本遇到，升级即可。反复出现且重试也没用，就带上 `request_id` 反馈 |
 | Token 用量重启后归零 | 1.3.0 的 bug（profile 名读错导致文件名漂移），1.3.1 已修。升级后首次启动会自动迁移旧的无后缀文件，累计数据不会丢 |
+| 报 `Cannot read properties of undefined (reading 'length')` | pi-ai 的 `sections` 处理缺陷（system 消息里某个 section 值为 `undefined` 时必崩）。1.3.2 起插件会在调用 pi-ai 前净化 context，不再出现；若在 1.3.1 及更早版本遇到，升级即可 |
 
 ---
 
@@ -450,7 +494,8 @@ git clone https://github.com/Phoeky/dsh-scnet-connect.git && cd dsh-scnet-connec
 node tools/check.mjs            # 自检：凭据、模型目录、账号
 node tools/check.mjs --live     # 额外请求一次 /models
 npm run check:fetch             # 错误归一化 + 归类 + 流中断改写（离线，无需凭据）
-npm run check:offline           # 上面三项 + HTTP 413/登录/token 用量（离线，无需凭据）
+npm run check:catalog           # 模型目录刷新竞态与网关过滤（离线，无需凭据）
+npm run check:offline           # 请求/HTTP 413/登录/token 用量/模型目录全部回归（离线，无需凭据）
 ```
 
 ```text

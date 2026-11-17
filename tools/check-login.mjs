@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createLoginManager } from '../lib/scnet-login.js';
+import { readClientAccount, readPlatformAccessToken } from '../lib/scnet-credential.js';
 
 const dirs = [];
 function tempHome() {
@@ -77,6 +78,17 @@ function check(label, actual, expected) {
 }
 
 try {
+  console.log('0. 凭据过期时间异常值不抛错');
+  {
+    const home = tempHome();
+    const payload = Buffer.from(JSON.stringify({ expireTime: '999999999999999999999999' })).toString('base64url');
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ accessToken: 'x.' + payload + '.x', userInfo: { id: 7, userName: 'tester' } }));
+    const token = readPlatformAccessToken(home);
+    check('超大过期时间被忽略', token?.expiresAt, undefined);
+    const account = readClientAccount(home);
+    check('账号读取不抛 RangeError', account?.tokenExpiresAt, undefined);
+  }
+
   console.log('1. 图形验证码网络异常');
   {
     const home = tempHome();

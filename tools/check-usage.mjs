@@ -153,7 +153,7 @@ try {
     const legacy = path.join(home, 'scnet-connect-usage.json');
     fs.writeFileSync(legacy, JSON.stringify({ requests: 7, profile: 'tui' }));
     const resolved = usageFilePath(home, 'desktop', {});
-    check('别的 profile 的旧文件不迁移', () => assert.equal(resolved, legacy));
+    check('别的 profile 的旧文件不迁移且不复用', () => assert.equal(resolved, path.join(home, 'scnet-connect-usage.desktop.json')));
     check('该文件仍在', () => assert.equal(fs.existsSync(legacy), true));
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -276,13 +276,20 @@ try {
 
   {
     const exitFile = path.join(dir, 'exit.json');
+    const listenersBeforeRecord = process.listenerCount('exit');
     const r = createUsageRecorder({ file: exitFile, flushDelayMs: 60_000 });
     r.record({ model: 'SCNet-Max', usage: { inputTokens: 10, outputTokens: 5 } });
+    check('记录后只新增一个 exit 监听', () => assert.equal(process.listenerCount('exit'), listenersBeforeRecord + 1));
     check('防抖窗口内尚未落盘', () => assert.equal(fs.existsSync(exitFile), false));
     r.dispose();
+    check('dispose 移除 exit 监听', () => assert.equal(process.listenerCount('exit'), listenersBeforeRecord));
     check('dispose 后已落盘', () => assert.equal(fs.existsSync(exitFile), true));
     check('落盘内容正确', () =>
       assert.equal(JSON.parse(fs.readFileSync(exitFile, 'utf8')).requests, 1));
+    const listenersAfterDispose = process.listenerCount('exit');
+    r.record({ model: 'late', usage: { inputTokens: 9, outputTokens: 9 } });
+    check('dispose 后 record 不再计数', () => assert.equal(r.snapshot().requests, 1));
+    check('dispose 后不重新挂 exit 监听', () => assert.equal(process.listenerCount('exit'), listenersAfterDispose));
   }
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

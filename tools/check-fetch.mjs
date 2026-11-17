@@ -3,6 +3,7 @@
 // 重点覆盖 400/10013 的「一次性自愈」：同一请求体只改写一次，第二次原样失败。
 import {
   createRetryFriendlyFetch,
+  sanitizePiContext,
   shouldNormalizeUpstreamError,
   withRetryFriendlyFetch,
 } from '../lib/scnet-fetch.js';
@@ -130,6 +131,91 @@ console.log('\n7. withRetryFriendlyFetch 透传 fetch');
   expect('stream 注入', seen === injected, true);
   await wrapped.streamSimple({}, {}, { temperature: 1 });
   expect('streamSimple 注入', seen === injected, true);
+}
+
+console.log('\n8. 数字错误码与重建响应头回归');
+expect('503+数字未知码不改写', shouldNormalizeUpstreamError(503, { error: { type: 'invalid_request_error', code: 99999 } }), false);
+expect('503+数字已知码可改写', shouldNormalizeUpstreamError(503, { error: { type: 'invalid_request_error', code: 10008 } }), true);
+for (const status of [400, 503]) {
+  const code = status === 400 ? '10013' : '10008';
+  const wrapped = createRetryFriendlyFetch({
+    fetchImpl: async () => new Response(JSON.stringify({ error: { type: 'invalid_request_error', code } }), {
+      status,
+      headers: { 'content-encoding': 'gzip', 'transfer-encoding': 'chunked', 'content-length': '123', 'x-request-id': 'local-regression' },
+    }),
+  });
+  const res = await wrapped('https://example.invalid/x', { body: '{"regression":true}' });
+  for (const header of ['content-encoding', 'transfer-encoding', 'content-length']) {
+    expect(`状态 ${status} 删除 ${header}`, res.headers.get(header), null);
+  }
+  expect('保留追踪头', res.headers.get('x-request-id'), 'local-regression');
+  expect('响应体仍是 JSON', (await res.json()).error.type, 'api_error');
+}
+
+console.log('\n9. sanitizePiContext：修 pi-ai 的 sections undefined.length 崩溃');
+{
+  // 线上事故（2026-11-17）：system 消息 sections 里值为 undefined 时，
+  // pi-ai utils/text.js:17 的 parts.filter(p => p.length) 会抛
+  // "Cannot read properties of undefined (reading 'length')"。
+  // 这里只验证净化本身；真实崩溃链已用解包出来的 pi-ai 单独验证过。
+
+  const poisoned = {
+    systemPrompt: 'sp',
+    messages: [
+      {
+        role: 'system',
+        content: [{ type: 'text', text: 'p' }],
+        sections: { good: 'ok', broken: undefined, removed: null, numeric: 7 },
+        timestamp: 0,
+        toolsAdded: [{ name: 'pwsh' }],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'x' }], timestamp: 1 },
+    ],
+    tools: [],
+  };
+
+  const cleaned = sanitizePiContext(poisoned);
+  expect('只保留字符串 section', JSON.stringify(cleaned.messages[0].sections), '{"good":"ok"}');
+  expect('其它字段保留', cleaned.messages[0].toolsAdded.length, 1);
+  expect('user 消息不受影响', cleaned.messages[1].content[0].text, 'x');
+  expect('systemPrompt 保留', cleaned.systemPrompt, 'sp');
+
+  // 纯函数：原对象不被改写
+  expect('原对象 sections 键未变', Object.keys(poisoned.messages[0].sections).length, 4);
+  expect('原对象仍含 undefined', poisoned.messages[0].sections.broken, undefined);
+
+  // 全部合法时原样返回同一引用（零开销）
+  const healthy = {
+    messages: [{ role: 'system', content: [{ type: 'text', text: 'p' }], sections: { a: 'x' } }],
+  };
+  expect('无需清洗时返回同一引用', sanitizePiContext(healthy) === healthy, true);
+
+  // sections 清空后整个字段被移除（等价于「没有 section」）
+  const allBad = {
+    messages: [{ role: 'system', content: [{ type: 'text', text: 'p' }], sections: { a: undefined } }],
+  };
+  const cleanedAllBad = sanitizePiContext(allBad);
+  expect('全非法时移除 sections 字段', 'sections' in cleanedAllBad.messages[0], false);
+
+  // 边界输入不抛
+  for (const weird of [undefined, null, {}, { messages: null }, { messages: 'x' }]) {
+    expect('边界输入不抛', (() => { try { sanitizePiContext(weird); return true; } catch { return false; } })(), true);
+  }
+  // 非 system 角色即使带 sections 也不动
+  const userWithSections = { messages: [{ role: 'user', content: 'x', sections: { a: undefined } }] };
+  expect('非 system 角色不改', sanitizePiContext(userWithSections) === userWithSections, true);
+
+  // 包装器确实把净化后的 context 交给 pi-ai
+  let received;
+  const api = {
+    stream: async (model, context) => { received = context; return 's'; },
+    streamSimple: async (model, context) => { received = context; return 's'; },
+  };
+  const wrapped = withRetryFriendlyFetch(api, async () => new Response('{}'));
+  await wrapped.streamSimple({}, poisoned, {});
+  expect('streamSimple 收到净化后的 sections', JSON.stringify(received.messages[0].sections), '{"good":"ok"}');
+  await wrapped.stream({}, poisoned, {});
+  expect('stream 收到净化后的 sections', JSON.stringify(received.messages[0].sections), '{"good":"ok"}');
 }
 
 console.log(failures === 0 ? '\n全部通过' : `\n失败 ${failures} 项`);
