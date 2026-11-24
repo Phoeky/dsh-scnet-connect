@@ -6,6 +6,7 @@ import {
   sanitizePiContext,
   shouldNormalizeUpstreamError,
   withRetryFriendlyFetch,
+  withSanitizedContext,
 } from '../lib/scnet-fetch.js';
 
 // —— 复刻自 dsh-llm-pi-ai/lib/index.js 的 classifyPiAiError（含正则顺序）——
@@ -216,6 +217,77 @@ console.log('\n9. sanitizePiContext：修 pi-ai 的 sections undefined.length �
   expect('streamSimple 收到净化后的 sections', JSON.stringify(received.messages[0].sections), '{"good":"ok"}');
   await wrapped.stream({}, poisoned, {});
   expect('stream 收到净化后的 sections', JSON.stringify(received.messages[0].sections), '{"good":"ok"}');
+}
+
+console.log('\n10. sanitizePiContext：修 content 块缺失字段导致的 undefined.length');
+{
+  // pi-ai 1.3.0 的 estimateMessageTokens（estimate.js:42/45/48）对 assistant 消息
+  // 逐块取 block.text.length / block.thinking.length / block.name.length，
+  // 字段缺失即抛 "Cannot read properties of undefined (reading 'length')"；
+  // content 若是字符串，for...of 会把字符当块，同样崩。
+  // 这条路径发生在 fetch 之前（clampMaxTokensToContext），fetch 层拦不到。
+  const U = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+  const poisonedBlocks = {
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text' },
+          { type: 'thinking' },
+          { type: 'toolCall', id: 'c1', arguments: {} },
+        ],
+        timestamp: 0,
+        usage: U,
+      },
+    ],
+  };
+  const cleanedBlocks = sanitizePiContext(poisonedBlocks);
+  const blocks = cleanedBlocks.messages[0].content;
+  expect('text.text 补成空串', blocks[0].text, '');
+  expect('thinking.thinking 补成空串', blocks[1].thinking, '');
+  expect('toolCall.name 补成空串', blocks[2].name, '');
+  expect('其余字段保留', blocks[2].id, 'c1');
+  expect('原对象块未被改写', poisonedBlocks.messages[0].content[0].text, undefined);
+
+  // content 是字符串的 assistant 消息 → 包成 text 块
+  const stringContent = { messages: [{ role: 'assistant', content: 'hi', timestamp: 0, usage: U }] };
+  const cleanedString = sanitizePiContext(stringContent);
+  expect('字符串 content 变块', JSON.stringify(cleanedString.messages[0].content), '[{"type":"text","text":"hi"}]');
+  const emptyString = { messages: [{ role: 'assistant', content: '', timestamp: 0, usage: U }] };
+  expect('空字符串 content 变空数组', JSON.stringify(sanitizePiContext(emptyString).messages[0].content), '[]');
+
+  // 正常块原样返回同一引用（零开销）
+  const healthyBlocks = {
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'ok' },
+          { type: 'thinking', thinking: 't' },
+          { type: 'toolCall', id: 'c', name: 'n', arguments: {} },
+        ],
+        timestamp: 0,
+        usage: U,
+      },
+    ],
+  };
+  expect('正常块返回同一引用', sanitizePiContext(healthyBlocks) === healthyBlocks, true);
+
+  // user / toolResult 的字符串 content 是合法形状，不能动
+  const userString = { messages: [{ role: 'user', content: 'plain', timestamp: 0 }] };
+  expect('user 字符串 content 不改', sanitizePiContext(userString) === userString, true);
+
+  // withSanitizedContext：关闭重试时净化仍在
+  let seen;
+  const raw = {
+    stream: (m, c) => { seen = c; return 's'; },
+    streamSimple: (m, c) => { seen = c; return 's'; },
+  };
+  const sanitizedOnly = withSanitizedContext(raw);
+  sanitizedOnly.streamSimple({}, poisonedBlocks, {});
+  expect('withSanitizedContext 仍净化 content', seen.messages[0].content[0].text, '');
+  sanitizedOnly.stream({}, poisonedBlocks, {});
+  expect('withSanitizedContext.stream 也净化', seen.messages[0].content[0].text, '');
 }
 
 console.log(failures === 0 ? '\n全部通过' : `\n失败 ${failures} 项`);

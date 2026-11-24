@@ -420,6 +420,29 @@ estimate.js:32             clampMaxTokensToContext → estimateContextTokens →
 | 经插件包装 + 毒饵 context | 正常 `start,done` |
 | 经插件包装 + 正常 context | 请求体与裸 pi-ai **逐字节一致** |
 
+### 关于设置页「HTTP 404」/ 插件未注册（1.3.3 起）
+
+现象：打开「设置 → SCNet Connect」只看到 `HTTP 404`（或整块空白），模型选择器里也没有 SCNet Connect；插件日志里是 `注册 provider 失败：an adapter for provider "scnet" is already registered`。
+
+根因不在 SCNet 平台，而在 provider **路由名冲突**：`ctx.llm.registerAdapter(['scnet'], …)` 发现 `scnet` 已被别的 provider 占用就会抛错。常见占用者：
+
+- `llm-pi-ai` 的 `cordis.patch.yml` 里手工声明的 `providers.scnet`（自己配过 SCNet key 的话很常见）；
+- 历史装过的 `dsh-scnet`、`dsh-connect-scnet-plus` 等同样注册 `scnet` 的包。
+
+旧版插件把这个异常当成致命错误直接中断，连设置页路由都不注册，于是浏览器只拿到 404，真正的原因完全看不见（[issue #1](https://github.com/Phoeky/dsh-scnet-connect/issues/1)）。
+
+1.3.3 起，注册失败**不再中断启动**：
+
+- 设置页照常打开，顶部红框直接显示「插件未注册」、冲突的路由名和三步修复建议；
+- 诊断快照（`$DSH_HOME/scnet-connect-status[.<profile>].json`）里保留 `registered: false`、`error`、`conflict`；
+- 日志给出同样的中文提示，不再只有一句英文异常。
+
+修复办法就按提示做：
+
+1. 把别的 provider 的 `scnet` 路由改名，例如 `llm-pi-ai` 的 `providers.scnet` 改成 `providers.scnet-manual`（模型选择器里会显示为另一个分组）；
+2. 停用其它同样注册 `scnet` 的插件；
+3. 在插件管理器里把 `include:scnet-connect` 关掉再开启（或重启 DSH），让本插件重新注册。
+
 ---
 
 ## 故障排查
@@ -438,6 +461,7 @@ estimate.js:32             clampMaxTokensToContext → estimateContextTokens →
 | 报 `The response stream was interrupted. (request_id: …)` | 上游在流中途掐断了响应。1.2.2 起会自动重试；若在 1.2.1 及更早版本遇到，升级即可。反复出现且重试也没用，就带上 `request_id` 反馈 |
 | Token 用量重启后归零 | 1.3.0 的 bug（profile 名读错导致文件名漂移），1.3.1 已修。升级后首次启动会自动迁移旧的无后缀文件，累计数据不会丢 |
 | 报 `Cannot read properties of undefined (reading 'length')` | pi-ai 的 `sections` 处理缺陷（system 消息里某个 section 值为 `undefined` 时必崩）。1.3.2 起插件会在调用 pi-ai 前净化 context，不再出现；若在 1.3.1 及更早版本遇到，升级即可 |
+| 设置页显示「HTTP 404」，插件未注册 | provider 路由名 `scnet` 被别的 provider 占用了（常见：`llm-pi-ai` 手工配的 `providers.scnet`、旧包 `dsh-scnet` / `dsh-connect-scnet-plus`）。1.3.3 起设置页会直接显示原因和三步修复；旧版本只能看 `$DSH_HOME/scnet-connect-status*.json` 里的 `error` |
 
 ---
 
